@@ -1,0 +1,2 @@
+# Lindungi folder data (database SQLite & session) dari akses langsung
+RedirectMatch 403 ^.*/data/.*$
