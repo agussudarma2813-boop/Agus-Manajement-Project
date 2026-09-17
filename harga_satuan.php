@@ -16,10 +16,15 @@ $items = fetch_harga_satuan($f);
 // ringkasan margin
 $totalJasa = 0.0;
 $totalUpah = 0.0;
+$tarifKhususItem = [];   // harga_satuan_id => jumlah pekerja bertarif khusus
 foreach ($items as $it) {
     $totalJasa += (float) $it['harga_jasa'];
     $totalUpah += (float) $it['harga_upah'];
+    $st = db()->prepare('SELECT COUNT(*) FROM harga_satuan_pekerja WHERE harga_satuan_id = ? AND perusahaan_id = ?');
+    $st->execute([(int) $it['id'], tenant_id()]);
+    $tarifKhususItem[(int) $it['id']] = (int) $st->fetchColumn();
 }
+$jmlBertarifKhusus = count(array_filter($tarifKhususItem));
 
 $actions = '';
 if ($isAdmin) {
@@ -38,7 +43,7 @@ render_header(
   stat_card('Jumlah Item', (string) count($items), 'item harga satuan', 'info');
   stat_card('Total Harga Jasa', e(rupiah($totalJasa)), 'penjumlahan harga jasa semua item', '');
   stat_card('Total Upah Pekerja', e(rupiah($totalUpah)), 'penjumlahan upah dasar semua item', 'warn');
-  stat_card('Selisih Dasar', e(rupiah($totalJasa - $totalUpah)), 'selisih jasa − upah per item', 'ok');
+  stat_card('Bertarif Khusus', (string) $jmlBertarifKhusus, 'item dengan tarif beda per pekerja', $jmlBertarifKhusus > 0 ? 'info' : '');
   ?>
 </div>
 
@@ -88,12 +93,20 @@ render_header(
                 <div class="cell-stack">
                   <strong><?= e($it['nama']) ?></strong>
                   <?php if ($it['keterangan'] !== ''): ?><small><?= e($it['keterangan']) ?></small><?php endif; ?>
+                  <?php if (($tarifKhususItem[(int) $it['id']] ?? 0) > 0): ?>
+                    <small><span class="pill pill-proses">tarif khusus <?= (int) $tarifKhususItem[(int) $it['id']] ?> pekerja</span></small>
+                  <?php endif; ?>
                 </div>
               </td>
               <td class="small"><?= e($it['kategori'] !== '' ? $it['kategori'] : '—') ?></td>
               <td><span class="tag"><?= e($it['satuan'] !== '' ? $it['satuan'] : '—') ?></span></td>
               <td class="strong nowrap"><?= e(rupiah($it['harga_jasa'])) ?></td>
-              <td class="nowrap"><?= e(rupiah($it['harga_upah'])) ?></td>
+              <td class="nowrap">
+                <?= e(rupiah($it['harga_upah'])) ?>
+                <?php if (($tarifKhususItem[(int) $it['id']] ?? 0) > 0): ?>
+                  <div class="small muted">tarif per pekerja diatur</div>
+                <?php endif; ?>
+              </td>
               <td class="nowrap <?= $selisih < 0 ? 'deadline-late' : '' ?>"><?= e(rupiah($selisih)) ?></td>
               <td><?= (int) $it['aktif'] === 1 ? '<span class="pill pill-selesai">Aktif</span>' : '<span class="pill pill-belum">Nonaktif</span>' ?></td>
               <?php if ($isAdmin): ?>
@@ -177,6 +190,7 @@ render_header(
       <ul class="steps">
         <li><strong>Harga jasa</strong> dipakai untuk menghitung nilai pengajuan ke perusahaan pemilik pekerjaan: <span class="mono">harga jasa × volume akhir</span>.</li>
         <li><strong>Upah pekerja</strong> dipakai untuk menghitung upah borongan pekerja: <span class="mono">upah × volume akhir × bagian</span>. Bagian bisa diatur per pekerja, dan tarifnya boleh di-override per orang.</li>
+        <li><strong>Tarif khusus per pekerja</strong>: bila upah pekerja berbeda-beda untuk item yang sama (mis. A 2.500 dan B 2.000), isi di bagian “Tarif Borongan Khusus per Pekerja”. Kalau tarifnya sama rata, biarkan kosong. Tarif ini otomatis dipakai di semua pekerjaan yang memakai item ini.</li>
         <li>Angka yang sudah dipakai di sebuah pekerjaan <strong>tersimpan di pekerjaan itu</strong>, jadi mengubah master tidak mengubah nilai yang sudah berjalan.</li>
       </ul>
     </div>

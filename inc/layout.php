@@ -14,6 +14,8 @@ function nav_icon(string $name): string
         'clock'     => '<path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm1 5h-2v6l5 3 1-1.7-4-2.3V7Z"/>',
         'money'     => '<path d="M3 6h18a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1Zm9 3a3 3 0 1 0 0 6 3 3 0 0 0 0-6ZM5 9a2 2 0 0 1-2 2v2a2 2 0 0 1 2 2h14a2 2 0 0 1 2-2v-2a2 2 0 0 1-2-2H5Z"/>',
         'price'     => '<path d="M4 3h10l6 6v12H4V3Zm2 2v14h12V10h-5V5H6Zm7 1.4V8h1.6L13 6.4ZM7 12h10v1.6H7V12Zm0 4h7v1.6H7V16Z"/>',
+        'wallet'    => '<path d="M3 6h15a3 3 0 0 1 3 3v9H6a3 3 0 0 1-3-3V6Zm2 1.2V15a1 1 0 0 0 1 1h13V9a1 1 0 0 0-1-1H5Zm11 5.8a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z"/>',
+        'cash'      => '<path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 4h1.4l.3 1.6c1.4.3 2.3 1.1 2.5 2.3l-1.8.3c-.1-.6-.7-1-1.6-1-.8 0-1.2.3-1.2.7 0 .5.5.7 1.8 1 1.7.4 2.9 1 2.9 2.5 0 1.2-1 2-2.4 2.3l-.2 1.5H12l-.2-1.5c-1.6-.3-2.6-1.2-2.8-2.5l1.8-.3c.2.7.9 1.1 1.9 1.1 1 0 1.4-.3 1.4-.8 0-.5-.5-.7-1.9-1-1.7-.4-2.8-1-2.8-2.5 0-1.2.9-2 2.3-2.3L12 6Z"/>',
         'company'   => '<path d="M3 21V7l6-3v3l6-3v4h6v13H3Zm2-2h14V10h-4V7.6l-6 3V9L5 8.1V19Zm2-2h2v-2H7v2Zm4 0h2v-2h-2v2Zm4 0h2v-2h-2v2ZM7 13h2v-2H7v2Zm4 0h2v-2h-2v2Zm4 0h2v-2h-2v2Z"/>',
         'calendar'  => '<path d="M7 2h2v2h6V2h2v2h3v18H4V4h3V2Zm11 8H6v10h12V10ZM6 8h12V6H6v2Z"/>',
         'check'     => '<path d="M9.6 16.2 5.4 12l-1.4 1.4 5.6 5.6L20.4 7.8 19 6.4 9.6 16.2Z"/>',
@@ -46,6 +48,9 @@ function render_header(string $title, string $subtitle = '', string $actions = '
         ['sep' => 'Absensi & Upah'],
         ['label' => $isPekerja ? 'Absensi Saya' : 'Absensi Hari Kerja', 'href' => 'absensi.php', 'icon' => 'clock'],
         ['label' => $isPekerja ? 'Upah Saya' : 'Upah & Gaji', 'href' => 'upah.php', 'icon' => 'money'],
+        ['sep' => 'Gaji & Kasbon'],
+        ['label' => $isPekerja ? 'Gaji Saya' : 'Gaji Pekerja', 'href' => 'gaji.php', 'icon' => 'wallet'],
+        ['label' => $isPekerja ? 'Kasbon Saya' : 'Kasbon', 'href' => 'kasbon.php', 'icon' => 'cash'],
     ];
     if (!$isPekerja) {
         $nav[] = ['sep' => 'Harga & Tagihan'];

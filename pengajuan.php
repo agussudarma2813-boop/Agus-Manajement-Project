@@ -2,161 +2,201 @@
 declare(strict_types=1);
 require_once __DIR__ . '/inc/auth.php';
 require_once __DIR__ . '/inc/queries.php';
+require_once __DIR__ . '/inc/partials.php';
 require_once __DIR__ . '/inc/layout.php';
 
 $u = require_role(['admin', 'pelaksana']);
 
 $f = [
-    'pelaksana_id' => (int) ($_GET['pelaksana_id'] ?? 0),
-    'q'            => trim((string) ($_GET['q'] ?? '')),
+    'project_id' => (int) ($_GET['project_id'] ?? 0),
+    'status'     => (string) ($_GET['status'] ?? ''),
+    'dari'       => valid_tanggal((string) ($_GET['dari'] ?? '')),
+    'sampai'     => valid_tanggal((string) ($_GET['sampai'] ?? '')),
 ];
-
-$per = rekap_pengajuan($f);
-
-/* ---------- Export CSV (rincian per item, semua project pada filter) ---------- */
-if (isset($_GET['export'])) {
-    header('Content-Type: text/csv; charset=UTF-8');
-    header('Content-Disposition: attachment; filename="pengajuan-pekerjaan-' . date('Ymd-His') . '.csv"');
-    $out = fopen('php://output', 'w');
-    fwrite($out, "\xEF\xBB\xBF");
-    fputcsv($out, [
-        'Kode Project', 'Project', 'Pekerjaan', 'Kategori', 'Satuan', 'Volume Kontrak', 'Volume Akhir',
-        'Harga Jasa / Satuan', 'Nilai Kontrak Jasa', 'Status', 'Nilai Pengajuan',
-        'Upah Borongan Item', 'Hari Kerja', 'Upah Harian Item', 'Margin Item',
-    ], ';');
-    foreach ($per as $r) {
-        foreach ($r['item'] as $it) {
-            $wid = (int) $it['id'];
-            $st = db()->prepare(
-                'SELECT COALESCE(SUM(hari),0) AS hari, COALESCE(SUM(hari*upah),0) AS upah
-                 FROM absensi WHERE pekerjaan_id = ?'
-            );
-            $st->execute([$wid]);
-            $ab = $st->fetch() ?: ['hari' => 0, 'upah' => 0];
-            fputcsv($out, [
-                $r['kode'], $r['nama'], $it['nama'], $it['kategori'], $it['satuan'],
-                num($it['volume']), num($it['volume_realisasi']),
-                num($it['harga_jasa']), num($it['nilai_kontrak']),
-                status_label($it['status']), num($it['nilai_jasa']),
-                num($it['upah_cair'] + $it['upah_berjalan']),
-                num_hari($ab['hari']), num($ab['upah']),
-                num($it['nilai_jasa'] - $it['upah_cair'] - (float) $ab['upah']),
-            ], ';');
-        }
-    }
-    fputcsv($out, [], ';');
-    fputcsv($out, ['REKAP PER PROJECT'], ';');
-    fputcsv($out, ['Project', 'Jumlah Item', 'Item Selesai', 'Nilai Kontrak', 'Nilai Siap Diajukan',
-        'Upah Borongan Item Selesai', 'Upah Harian Project', 'Estimasi Margin'], ';');
-    foreach ($per as $r) {
-        fputcsv($out, [
-            $r['kode'] . ' ' . $r['nama'], $r['jml_item'], $r['jml_selesai'],
-            num($r['nilai_kontrak']), num($r['nilai_diajukan']),
-            num($r['upah_selesai']), num($r['upah_harian']), num($r['margin']),
-        ], ';');
-    }
-    fclose($out);
-    exit;
+if (!in_array($f['status'], ['diajukan', 'dibayar'], true)) {
+    $f['status'] = '';
 }
 
-$totalKontrak = array_sum(array_map(fn($r) => $r['nilai_kontrak'], $per));
-$totalDiajukan = array_sum(array_map(fn($r) => $r['nilai_diajukan'], $per));
-$totalUpah = array_sum(array_map(fn($r) => $r['upah_selesai'], $per));
-$totalMargin = array_sum(array_map(fn($r) => $r['margin'], $per));
+$daftar = fetch_pengajuan($f);
 
-$exportUrl = 'pengajuan.php?' . http_build_query(array_merge($f, ['export' => '1']));
+// ringkasan: per project (hanya yang bisa saya kelola)
+$projects = [];
+foreach (selectable_projects() as $p) {
+    $projects[(int) $p['id']] = $p;
+}
+$ringkas = [];
+foreach ($daftar as $d) {
+    $pid = (int) $d['project_id'];
+    if (!isset($ringkas[$pid])) {
+        $ringkas[$pid] = ['nama' => $d['project_nama'], 'kode' => $d['project_kode'], 'jumlah' => 0,
+                          'diajukan' => 0.0, 'dibayar' => 0.0, 'item' => 0];
+    }
+    $ringkas[$pid]['jumlah']++;
+    $ringkas[$pid]['item'] += (int) $d['jml_item'];
+    if ($d['status'] === 'dibayar') {
+        $ringkas[$pid]['dibayar'] += (float) $d['nilai'];
+    } else {
+        $ringkas[$pid]['diajukan'] += (float) $d['nilai'];
+    }
+}
+
+$totMenunggu = 0.0;
+$totDibayar = 0.0;
+foreach ($daftar as $d) {
+    if ($d['status'] === 'dibayar') {
+        $totDibayar += (float) $d['nilai'];
+    } else {
+        $totMenunggu += (float) $d['nilai'];
+    }
+}
+
+// sisa volume yang belum diajukan (hanya untuk project yang dipilih/dikelola)
+$proyekKelola = array_values(array_filter(selectable_projects(), fn($p) => can_manage_project($p)));
+$sisaRekap = [];
+foreach ($proyekKelola as $p) {
+    $r = ringkasan_tagihan_project((int) $p['id']);
+    if ($r['nilai_sisa'] > 0 || $r['nilai_diajukan'] > 0) {
+        $sisaRekap[(int) $p['id']] = $r + ['nama' => $p['nama'], 'kode' => $p['kode']];
+    }
+}
+
+$actions = '<a class="btn" href="pengajuan_export.php">Export Excel</a>';
+if ($proyekKelola) {
+    $actions .= '<a class="btn btn-primary" href="pengajuan_form.php">+ Buat Pengajuan</a>';
+}
 
 render_header(
     'Pengajuan ke Perusahaan',
-    'Nilai jasa yang bisa ditagihkan berdasarkan pekerjaan yang sudah diselesaikan per project',
-    '<a class="btn" href="upah.php">Upah Pekerja</a><a class="btn btn-dark" href="' . e($exportUrl) . '">Export CSV</a>'
+    'Pilih project, centang sub pekerjaan, isi volume yang diajukan — bisa bertahap sampai sisa habis',
+    $actions
 );
 ?>
 
 <div class="stats">
   <?php
-  stat_card('Nilai Kontrak (Jasa)', e(rupiah($totalKontrak)), 'seluruh item pada filter ini', 'info');
-  stat_card('Siap Diajukan', e(rupiah($totalDiajukan)), 'item berstatus Selesai · volume akhir', 'ok');
-  stat_card('Upah Borongan Item', e(rupiah($totalUpah)), 'upah pekerja item yang sudah selesai', 'warn');
-  stat_card('Estimasi Margin', e(rupiah($totalMargin)), 'nilai diajukan − upah borongan − upah harian terkait', $totalMargin < 0 ? 'danger' : '');
+  stat_card('Pengajuan Dibuat', (string) count($daftar), count($ringkas) . ' project terlibat', 'info');
+  stat_card('Menunggu Dibayar', e(rupiah($totMenunggu)), 'sudah diajukan, belum dibayar', $totMenunggu > 0 ? 'warn' : '');
+  stat_card('Sudah Dibayar', e(rupiah($totDibayar)), 'dibayar perusahaan pemilik pekerjaan', 'ok');
+  stat_card('Masih Ada Sisa', (string) count($sisaRekap), 'project yang volumenya belum habis diajukan', 'info');
   ?>
 </div>
 
+<?php if ($sisaRekap): ?>
+  <div class="card flush">
+    <div class="card-head">
+      <div><h2>Volume yang Belum Diajukan</h2><p>Semua sub pekerjaan dihitung: volume akhir bila sudah ada, kalau belum pakai volume kontrak</p></div>
+    </div>
+    <div class="table-wrap">
+      <table class="tbl">
+        <thead>
+          <tr><th>Project</th><th>Sub pekerjaan</th><th>Nilai kontrak</th><th>Sudah diajukan</th><th>Belum diajukan</th><th></th></tr>
+        </thead>
+        <tbody>
+        <?php foreach ($sisaRekap as $pid => $r): ?>
+          <tr>
+            <td>
+              <div class="cell-stack">
+                <a href="project_detail.php?id=<?= (int) $pid ?>"><strong><?= e($r['nama']) ?></strong></a>
+                <small><?= e($r['kode']) ?></small>
+              </div>
+            </td>
+            <td class="small"><?= (int) $r['item'] ?> item</td>
+            <td class="nowrap"><?= e(rupiah($r['nilai_kontrak'])) ?></td>
+            <td class="nowrap"><?= e(rupiah($r['nilai_diajukan'])) ?></td>
+            <td class="strong nowrap <?= $r['nilai_sisa'] > 0 ? 'deadline-soon' : '' ?>"><?= e(rupiah($r['nilai_sisa'])) ?></td>
+            <td class="right nowrap">
+              <?php if ($r['nilai_sisa'] > 0 && can_manage_project(get_project((int) $pid))): ?>
+                <a class="btn btn-sm btn-primary" href="pengajuan_form.php?project_id=<?= (int) $pid ?>">Ajukan Sisa</a>
+              <?php else: ?>
+                <span class="pill pill-selesai">Sudah diajukan penuh</span>
+              <?php endif; ?>
+            </td>
+          </tr>
+        <?php endforeach; ?>
+        </tbody>
+      </table>
+    </div>
+  </div>
+<?php endif; ?>
+
 <div class="card">
   <form class="filters" method="get">
-    <div class="field" style="flex:1;min-width:200px">
-      <label for="q">Cari project</label>
-      <input type="text" id="q" name="q" value="<?= e($f['q']) ?>" placeholder="Nama atau kode project">
+    <div class="field">
+      <label for="project_id">Project</label>
+      <select id="project_id" name="project_id"><?php project_options($f['project_id']); ?></select>
     </div>
     <div class="field">
-      <label for="pelaksana_id">Pelaksana</label>
-      <select id="pelaksana_id" name="pelaksana_id">
-        <option value="">Semua pelaksana</option>
-        <?php foreach (selectable_pelaksana() as $pl): ?>
-          <option value="<?= (int) $pl['id'] ?>"<?= $f['pelaksana_id'] === (int) $pl['id'] ? ' selected' : '' ?>><?= e($pl['nama']) ?></option>
-        <?php endforeach; ?>
+      <label for="status">Status</label>
+      <select id="status" name="status">
+        <option value="">Semua status</option>
+        <option value="diajukan"<?= $f['status'] === 'diajukan' ? ' selected' : '' ?>>Sudah diajukan (belum bayar)</option>
+        <option value="dibayar"<?= $f['status'] === 'dibayar' ? ' selected' : '' ?>>Sudah dibayar</option>
       </select>
+    </div>
+    <div class="field">
+      <label for="dari">Dari tanggal</label>
+      <input type="date" id="dari" name="dari" value="<?= e($f['dari']) ?>">
+    </div>
+    <div class="field">
+      <label for="sampai">Sampai</label>
+      <input type="date" id="sampai" name="sampai" value="<?= e($f['sampai']) ?>">
     </div>
     <button class="btn btn-dark" type="submit">Terapkan</button>
     <a class="btn btn-ghost" href="pengajuan.php">Reset</a>
   </form>
-  <p class="small muted" style="margin:14px 0 0">
-    Nilai pengajuan = <strong>harga jasa × volume akhir</strong> untuk pekerjaan yang sudah berstatus
-    <em>Selesai</em>. Bila volume akhir belum diisi, volume kontrak dipakai sebagai gantinya.
-  </p>
 </div>
 
 <div class="card flush">
   <div class="card-head">
-    <div><h2>Rekap Pengajuan per Project</h2><p><?= count($per) ?> project pada filter ini</p></div>
+    <div><h2>Daftar Pengajuan</h2><p><?= count($daftar) ?> pengajuan pada filter ini</p></div>
   </div>
-  <?php if (!$per): ?>
+  <?php if (!$daftar): ?>
     <div class="empty">
-      <strong>Belum ada project dengan nilai jasa</strong>
-      <span class="small">Isi harga jasa pada pekerjaan (atau lewat master harga satuan) agar nilai pengajuan terhitung.</span>
+      <strong>Belum ada pengajuan</strong>
+      <span class="small">
+        Klik <strong>+ Buat Pengajuan</strong>: pilih project → centang sub pekerjaan → isi volume yang
+        mau diajukan. Volume yang belum sesuai kontrak bisa diajukan lagi nanti.
+      </span>
     </div>
   <?php else: ?>
     <div class="table-wrap">
       <table class="tbl">
         <thead>
           <tr>
-            <th>Project</th><th>Item</th><th>Nilai Kontrak</th><th>Siap Diajukan</th>
-            <th>Upah Borongan</th><th>Upah Harian</th><th>Estimasi Margin</th><th></th>
+            <th>Tanggal</th><th>Project</th><th>Sub pekerjaan</th><th>Volume diajukan</th>
+            <th>Nilai ke perusahaan</th><th>Status</th><th></th>
           </tr>
         </thead>
         <tbody>
-        <?php foreach ($per as $r): ?>
+        <?php foreach ($daftar as $d): ?>
           <tr>
+            <td class="nowrap"><strong><?= e(tgl($d['tanggal'])) ?></strong></td>
             <td>
               <div class="cell-stack">
-                <a href="pengajuan_detail.php?id=<?= (int) $r['project_id'] ?>"><strong><?= e($r['nama']) ?></strong></a>
-                <small><?= e($r['kode']) ?><?= $r['pelaksana'] !== '' ? ' · Pelaksana ' . e($r['pelaksana']) : '' ?></small>
+                <a href="project_detail.php?id=<?= (int) $d['project_id'] ?>"><?= e($d['project_nama']) ?></a>
+                <small><?= e($d['project_kode']) ?></small>
               </div>
             </td>
-            <td class="small nowrap"><?= (int) $r['jml_selesai'] ?>/<?= (int) $r['jml_item'] ?> selesai</td>
-            <td class="nowrap"><?= e(rupiah($r['nilai_kontrak'])) ?></td>
-            <td class="strong nowrap"><?= e(rupiah($r['nilai_diajukan'])) ?></td>
-            <td class="nowrap"><?= e(rupiah($r['upah_selesai'])) ?></td>
-            <td class="small nowrap muted"><?= e(rupiah($r['upah_harian'])) ?></td>
-            <td class="nowrap <?= $r['margin'] < 0 ? 'deadline-late' : 'strong' ?>"><?= e(rupiah($r['margin'])) ?></td>
+            <td class="small"><?= (int) $d['jml_item'] ?> item</td>
+            <td class="nowrap"><?= e(num($d['volume'])) ?></td>
+            <td class="strong nowrap"><?= e(rupiah($d['nilai'])) ?></td>
+            <td>
+              <?php if ($d['status'] === 'dibayar'): ?>
+                <span class="pill pill-selesai">Sudah dibayar</span>
+                <?php if ($d['tanggal_bayar'] !== ''): ?><div class="small muted"><?= e(tgl($d['tanggal_bayar'])) ?></div><?php endif; ?>
+              <?php else: ?>
+                <span class="pill pill-proses">Sudah diajukan</span>
+              <?php endif; ?>
+            </td>
             <td class="right nowrap">
-              <a class="btn btn-sm" href="pengajuan_detail.php?id=<?= (int) $r['project_id'] ?>">Rincian Item</a>
+              <div class="row-actions">
+                <a class="btn btn-sm" href="pengajuan_detail.php?id=<?= (int) $d['id'] ?>">Rincian</a>
+                <a class="btn btn-sm btn-dark" href="pengajuan_export.php?project_id=<?= (int) $d['project_id'] ?>">Excel</a>
+              </div>
             </td>
           </tr>
         <?php endforeach; ?>
         </tbody>
-        <tfoot>
-          <tr>
-            <td class="strong">Total</td>
-            <td></td>
-            <td class="strong nowrap"><?= e(rupiah($totalKontrak)) ?></td>
-            <td class="strong nowrap"><?= e(rupiah($totalDiajukan)) ?></td>
-            <td class="nowrap"><?= e(rupiah($totalUpah)) ?></td>
-            <td></td>
-            <td class="strong nowrap"><?= e(rupiah($totalMargin)) ?></td>
-            <td></td>
-          </tr>
-        </tfoot>
       </table>
     </div>
   <?php endif; ?>

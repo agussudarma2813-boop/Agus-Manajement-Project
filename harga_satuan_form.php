@@ -24,6 +24,10 @@ $data = [
 ];
 $errors = [];
 
+// Tarif borongan khusus per pekerja (opsional). Kosong = pakai upah dasar item.
+$tarifKhusus = $item ? tarif_khusus_daftar((int) $item['id']) : [];
+$timPekerja = array_values(array_filter(all_users(), fn($x) => $x['role'] !== 'admin'));
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
     foreach (['nama', 'kategori', 'satuan', 'harga_jasa', 'harga_upah', 'keterangan'] as $k) {
@@ -45,6 +49,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
+    // tarif khusus dari form (hanya diisi bila memang beda per pekerja)
+    $tarifPost = [];
+    if (is_array($_POST['tarif_khusus'] ?? null)) {
+        foreach ((array) $_POST['tarif_khusus'] as $uid => $nominal) {
+            $nominal = trim((string) $nominal);
+            if ($nominal !== '') {
+                $tarifPost[(int) $uid] = $nominal;
+            }
+        }
+    }
+
     if (empty($errors)) {
         $args = [
             $data['nama'],
@@ -61,13 +76,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'UPDATE harga_satuan SET nama=?, kategori=?, satuan=?, harga_jasa=?, harga_upah=?, keterangan=?, aktif=?
                  WHERE id=?'
             )->execute($args);
-            flash('Item harga <strong>' . e($data['nama']) . '</strong> berhasil diperbarui.');
+            simpan_tarif_khusus($id, $tarifPost);
+            $jmlKhusus = count($tarifPost);
+            flash('Item harga <strong>' . e($data['nama']) . '</strong> berhasil diperbarui.'
+                . ($jmlKhusus > 0
+                    ? ' Tarif khusus ' . $jmlKhusus . ' pekerja tersimpan (otomatis dipakai di semua pekerjaan item ini).'
+                    : ' Tarif khusus dikosongkan — semua pekerja memakai upah dasar item.'));
         } else {
             db()->prepare(
                 'INSERT INTO harga_satuan (nama, kategori, satuan, harga_jasa, harga_upah, keterangan, aktif)
                  VALUES (?,?,?,?,?,?,?)'
             )->execute($args);
-            flash('Item harga <strong>' . e($data['nama']) . '</strong> berhasil ditambahkan.');
+            $id = (int) db()->lastInsertId();
+            simpan_tarif_khusus($id, $tarifPost);
+            flash('Item harga <strong>' . e($data['nama']) . '</strong> berhasil ditambahkan.'
+                . (count($tarifPost) > 0 ? ' Dengan tarif khusus ' . count($tarifPost) . ' pekerja.' : ''));
         }
         redirect('harga_satuan.php');
     }
@@ -134,6 +157,40 @@ render_header(
       </label>
     </div>
   </div>
+
+  <div class="card-head" style="padding:22px 0 14px;border-bottom:1px solid var(--line-soft);margin:18px 0 16px">
+    <div>
+      <h2>Tarif Borongan Khusus per Pekerja (opsional)</h2>
+      <p>Isi hanya bila tarif pekerja memang berbeda-beda untuk item ini</p>
+    </div>
+  </div>
+  <p class="small muted" style="margin:0 0 14px">
+    Contoh: penarikan kabel dibayar <strong>Rp <?= e(num((float) ($item['harga_upah'] ?? 0))) ?></strong> per satuan sebagai upah dasar,
+    tapi Pekerja A dapat <span class="mono">2.500</span> dan Pekerja B <span class="mono">2.000</span>.
+    Kosongkan baris yang tarifnya sama dengan upah dasar. Tarif ini <strong>otomatis tersinkron</strong>:
+    mengubahnya di sini langsung dipakai pada semua pekerjaan yang memakai item ini.
+  </p>
+  <?php if (!$timPekerja): ?>
+    <p class="muted small">Belum ada pekerja/pelaksana. <a href="users.php">Tambahkan pengguna</a> dulu.</p>
+  <?php else: ?>
+    <div class="tarif-list">
+      <?php foreach ($timPekerja as $pk): $uid = (int) $pk['id']; ?>
+        <label class="tarif-row">
+          <?= badge_avatar($pk['nama'], 'sm') ?>
+          <span class="grow">
+            <strong><?= e($pk['nama']) ?></strong>
+            <small><?= e($pk['jabatan'] !== '' ? $pk['jabatan'] : role_label($pk['role'])) ?> · upah dasar item <?= e(rupiah($item['harga_upah'] ?? 0)) ?></small>
+          </span>
+          <span class="tarif-input">
+            <span class="muted small">Tarif khusus / satuan</span>
+            <input type="text" name="tarif_khusus[<?= $uid ?>]"
+                   value="<?= isset($tarifKhusus[$uid]) && $tarifKhusus[$uid] > 0 ? e(num($tarifKhusus[$uid])) : '' ?>"
+                   placeholder="sama dgn dasar">
+          </span>
+        </label>
+      <?php endforeach; ?>
+    </div>
+  <?php endif; ?>
 
   <div class="form-actions" style="margin-top:18px">
     <button class="btn btn-primary" type="submit"><?= $item ? 'Simpan Perubahan' : 'Simpan Item Harga' ?></button>

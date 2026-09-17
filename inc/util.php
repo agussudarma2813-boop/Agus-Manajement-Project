@@ -234,6 +234,14 @@ function num_hari(float|int|null $n): string
     return rtrim(rtrim(number_format($n, 2, ',', '.'), '0'), ',');
 }
 
+/** Angka untuk ekspor XML/Excel: desimal pakai titik, tanpa pemisah ribuan */
+function num_xml(float|int|null $n): string
+{
+    $n = (float) $n;
+    $s = rtrim(rtrim(number_format($n, 4, '.', ''), '0'), '.');
+    return $s === '' || $s === '-' ? '0' : $s;
+}
+
 /** Jumlah hari ditulis rapi: 1 hari, 0,5 hari, 2 hari */
 function hari_format(float|int|null $n): string
 {

@@ -266,6 +266,60 @@ render_header('Dashboard', 'Ringkasan kondisi project, pekerjaan dan tim lapanga
       </div>
     </div>
 
+    <?php
+    $periodeDash = periode_gaji();
+    $gajiDash = fetch_penggajian([
+        'dari' => $periodeDash['dari'],
+        'sampai' => $periodeDash['sampai'],
+        'user_id' => $myTasks ? (int) $u['id'] : 0,
+    ]);
+    $gajiBelum = 0.0;
+    $gajiDibayar = 0.0;
+    foreach ($gajiDash as $gd) {
+        if ($gd['status'] === 'dibayar') {
+            $gajiDibayar += (float) $gd['total_dibayar'];
+        } else {
+            $gajiBelum += (float) $gd['total_dibayar'];
+        }
+    }
+    $kasbonAktifSaya = kasbon_total_aktif((int) $u['id']);
+    $gajiOrangBelum = count(array_filter($gajiDash, fn($gd) => $gd['status'] !== 'dibayar'));
+    ?>
+    <div class="card">
+      <div class="card-head" style="padding:0 0 14px;border-bottom:1px solid var(--line-soft);margin-bottom:16px">
+        <div>
+          <h2><?= $myTasks ? 'Gaji &amp; Kasbon Saya' : 'Gaji Periode Ini' ?></h2>
+          <p><?= e($periodeDash['label']) ?></p>
+        </div>
+      </div>
+      <div class="upah-summary">
+        <div>
+          <span class="stat-label">Belum dibayar</span>
+          <strong><?= e(rupiah($gajiBelum)) ?></strong>
+        </div>
+        <div>
+          <span class="stat-label">Sudah dibayar</span>
+          <strong><?= e(rupiah($gajiDibayar)) ?></strong>
+        </div>
+        <div class="hl">
+          <span class="stat-label">Kasbon aktif <?= $myTasks ? 'saya' : '(semua tenaga)' ?></span>
+          <strong><?= e(rupiah($kasbonAktifSaya)) ?></strong>
+        </div>
+      </div>
+      <p class="small muted" style="margin:12px 0 0">
+        <?php if ($myTasks): ?>
+          Gaji diterima = gaji seharusnya − kasbon. Status pembayaran ditandai admin/pelaksana.
+        <?php else: ?>
+          <?= $gajiOrangBelum ?> penggajian belum dibayar pada periode ini.
+          Kasbon otomatis dipotong saat penggajian dibuat.
+        <?php endif; ?>
+      </p>
+      <div class="row-actions" style="margin-top:14px;justify-content:flex-start">
+        <a class="btn btn-sm btn-primary" href="gaji.php"><?= $myTasks ? 'Lihat Gaji Saya' : 'Kelola Gaji' ?></a>
+        <a class="btn btn-sm" href="kasbon.php"><?= $myTasks ? 'Kasbon Saya' : 'Kasbon' ?></a>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-head" style="padding:0 0 14px;border-bottom:1px solid var(--line-soft);margin-bottom:16px">
         <div><h2>Tim Lapangan</h2><p>Jumlah personel yang terdaftar</p></div>

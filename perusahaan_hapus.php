@@ -27,6 +27,11 @@ if ($konfirmasi !== $row['nama']) {
 }
 
 // Hapus berantai: data anak dulu, baru project & user perusahaan tersebut.
+db()->prepare('DELETE FROM penggajian_item WHERE perusahaan_id = ?')->execute([$id]);
+db()->prepare('DELETE FROM kasbon WHERE perusahaan_id = ?')->execute([$id]);
+db()->prepare('DELETE FROM penggajian WHERE perusahaan_id = ?')->execute([$id]);
+db()->prepare('DELETE FROM pengajuan_item WHERE perusahaan_id = ?')->execute([$id]);
+db()->prepare('DELETE FROM pengajuan WHERE perusahaan_id = ?')->execute([$id]);
 db()->prepare('DELETE FROM laporan_kerja WHERE perusahaan_id = ?')->execute([$id]);
 db()->prepare('DELETE FROM absensi WHERE perusahaan_id = ?')->execute([$id]);
 db()->prepare('DELETE FROM jadwal WHERE perusahaan_id = ?')->execute([$id]);

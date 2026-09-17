@@ -152,6 +152,105 @@ function app_migrate(PDO $pdo): void
         );
         CREATE INDEX IF NOT EXISTS idx_harga_satuan_nama ON harga_satuan(nama);
 
+        /* Tarif borongan khusus per pekerja untuk sebuah item master.
+           Opsi: dipakai HANYA bila upah pekerja itu memang berbeda-beda.
+           Kosong = semua pekerja pakai upah dasar item. */
+        CREATE TABLE IF NOT EXISTS harga_satuan_pekerja (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            harga_satuan_id INTEGER NOT NULL REFERENCES harga_satuan(id) ON DELETE CASCADE,
+            user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            harga_upah      REAL NOT NULL DEFAULT 0,
+            perusahaan_id   INTEGER NOT NULL DEFAULT 0,
+            UNIQUE (harga_satuan_id, user_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_hsp_harga ON harga_satuan_pekerja(harga_satuan_id);
+
+        /* Pengajuan tagihan ke perusahaan pemilik pekerjaan.
+           Sederhana: satu pengajuan = satu project, berisi beberapa sub pekerjaan
+           dengan volume yang diajukan (boleh bertahap / sebagian). */
+        CREATE TABLE IF NOT EXISTS pengajuan (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            nomor            TEXT NOT NULL DEFAULT '',
+            project_id       INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            tanggal          TEXT NOT NULL,
+            status           TEXT NOT NULL DEFAULT 'diajukan',
+            tanggal_bayar    TEXT NOT NULL DEFAULT '',
+            catatan          TEXT NOT NULL DEFAULT '',
+            created_by       INTEGER,
+            created_at       TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            perusahaan_id    INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_pengajuan_project ON pengajuan(project_id);
+        CREATE INDEX IF NOT EXISTS idx_pengajuan_status  ON pengajuan(status);
+
+        /* Kasbon (pinjaman/kas bon pekerja): dipotong dari gaji berikutnya.
+           penggajian_id terisi bila kasbon sudah dipotong pada sebuah penggajian. */
+        CREATE TABLE IF NOT EXISTS kasbon (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            tanggal       TEXT NOT NULL,
+            nominal       REAL NOT NULL DEFAULT 0,
+            keterangan    TEXT NOT NULL DEFAULT '',
+            penggajian_id INTEGER REFERENCES penggajian(id) ON DELETE SET NULL,
+            created_by    INTEGER,
+            created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            perusahaan_id INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_kasbon_user ON kasbon(user_id);
+        CREATE INDEX IF NOT EXISTS idx_kasbon_tgl  ON kasbon(tanggal);
+
+        /* Penggajian per pekerja per periode (periode mengikuti tanggal tutup buku).
+           Nilai gaji & kasbon disimpan sebagai snapshot supaya riwayat tidak berubah. */
+        CREATE TABLE IF NOT EXISTS penggajian (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            nomor           TEXT NOT NULL DEFAULT '',
+            user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            periode_dari    TEXT NOT NULL DEFAULT '',
+            periode_sampai  TEXT NOT NULL DEFAULT '',
+            hari_kerja      REAL NOT NULL DEFAULT 0,
+            upah_harian     REAL NOT NULL DEFAULT 0,
+            upah_borongan   REAL NOT NULL DEFAULT 0,
+            total_gaji      REAL NOT NULL DEFAULT 0,
+            total_kasbon    REAL NOT NULL DEFAULT 0,
+            total_dibayar   REAL NOT NULL DEFAULT 0,
+            status          TEXT NOT NULL DEFAULT 'belum',
+            tanggal_bayar   TEXT NOT NULL DEFAULT '',
+            catatan         TEXT NOT NULL DEFAULT '',
+            created_by      INTEGER,
+            created_at      TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            perusahaan_id   INTEGER NOT NULL DEFAULT 0,
+            UNIQUE (user_id, periode_dari, periode_sampai)
+        );
+        CREATE INDEX IF NOT EXISTS idx_gaji_user   ON penggajian(user_id);
+        CREATE INDEX IF NOT EXISTS idx_gaji_status ON penggajian(status);
+        CREATE INDEX IF NOT EXISTS idx_gaji_periode ON penggajian(periode_sampai);
+
+        CREATE TABLE IF NOT EXISTS penggajian_item (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            penggajian_id INTEGER NOT NULL REFERENCES penggajian(id) ON DELETE CASCADE,
+            jenis         TEXT NOT NULL DEFAULT 'borongan',
+            keterangan    TEXT NOT NULL DEFAULT '',
+            volume        REAL NOT NULL DEFAULT 0,
+            satuan        TEXT NOT NULL DEFAULT '',
+            nilai         REAL NOT NULL DEFAULT 0,
+            perusahaan_id INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_gitem_penggajian ON penggajian_item(penggajian_id);
+
+        CREATE TABLE IF NOT EXISTS pengajuan_item (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            pengajuan_id    INTEGER NOT NULL REFERENCES pengajuan(id) ON DELETE CASCADE,
+            pekerjaan_id    INTEGER NOT NULL REFERENCES pekerjaan(id) ON DELETE CASCADE,
+            volume          REAL NOT NULL DEFAULT 0,
+            harga_jasa      REAL NOT NULL DEFAULT 0,
+            satuan          TEXT NOT NULL DEFAULT '',
+            nama_item       TEXT NOT NULL DEFAULT '',
+            perusahaan_id   INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_pengitem_pengajuan ON pengajuan_item(pengajuan_id);
+        CREATE INDEX IF NOT EXISTS idx_pengitem_pekerjaan ON pengajuan_item(pekerjaan_id);
+        CREATE INDEX IF NOT EXISTS idx_hsp_user  ON harga_satuan_pekerja(user_id);
+
         /* Perusahaan (pelanggan) — pemisah data antar pelanggan aplikasi.
            Masa aktif, batas jumlah user, status aktif/nonaktif, dan branding. */
         CREATE TABLE IF NOT EXISTS perusahaan (
@@ -232,6 +331,14 @@ function app_migrate(PDO $pdo): void
         // 1 = volume_realisasi dihitung otomatis dari laporan harian (bukan isian manual)
         ensure_column($pdo, 'pekerjaan', 'volume_auto', 'INTEGER NOT NULL DEFAULT 0');
 
+        // Status penagihan ke perusahaan pemilik pekerjaan: belum → diajukan → dibayar
+        ensure_column($pdo, 'pekerjaan', 'tagih_status', "TEXT NOT NULL DEFAULT 'belum'");
+        ensure_column($pdo, 'pekerjaan', 'tagih_diajukan_tanggal', "TEXT NOT NULL DEFAULT ''");
+        ensure_column($pdo, 'pekerjaan', 'tagih_dibayar_tanggal', "TEXT NOT NULL DEFAULT ''");
+        ensure_column($pdo, 'pekerjaan', 'tagih_catatan', "TEXT NOT NULL DEFAULT ''");
+        // Total volume yang sudah diajukan ke perusahaan (boleh bertahap)
+        ensure_column($pdo, 'pekerjaan', 'tagih_volume', 'REAL NOT NULL DEFAULT 0');
+
         // Pembagian upah borongan per pekerja
         ensure_column($pdo, 'pekerjaan_pekerja', 'bagian_pct', 'REAL NOT NULL DEFAULT 0');
         ensure_column($pdo, 'pekerjaan_pekerja', 'harga_upah_override', 'REAL NOT NULL DEFAULT 0');
@@ -241,10 +348,14 @@ function app_migrate(PDO $pdo): void
 
         // Multi-perusahaan: setiap baris data milik satu perusahaan (pelanggan)
         foreach (['users', 'projects', 'lokasi', 'pekerjaan', 'pekerjaan_pekerja',
-                  'progress_log', 'absensi', 'harga_satuan', 'jadwal', 'laporan_kerja'] as $tabel) {
+                  'progress_log', 'absensi', 'harga_satuan', 'jadwal', 'laporan_kerja',
+                  'harga_satuan_pekerja', 'pengajuan', 'pengajuan_item',
+                  'kasbon', 'penggajian', 'penggajian_item'] as $tabel) {
             ensure_column($pdo, $tabel, 'perusahaan_id', 'INTEGER NOT NULL DEFAULT 0');
         }
         ensure_column($pdo, 'users', 'is_owner', 'INTEGER NOT NULL DEFAULT 0');
+        // Tanggal tutup buku (1-28). 0 = tanpa tutup buku (periode = tanggal 1..akhir bulan).
+        ensure_column($pdo, 'perusahaan', 'tutup_buku_tgl', 'INTEGER NOT NULL DEFAULT 25');
         ensure_index($pdo, 'idx_users_perusahaan', 'users', 'perusahaan_id');
         ensure_index($pdo, 'idx_projects_perusahaan', 'projects', 'perusahaan_id');
         ensure_index($pdo, 'idx_pekerjaan_perusahaan', 'pekerjaan', 'perusahaan_id');
@@ -259,6 +370,7 @@ function app_migrate(PDO $pdo): void
         seed_harga_satuan($pdo);
         seed_skema_demo($pdo);
         seed_jadwal_kerja($pdo);
+        migrasi_tagihan_lama($pdo);
         pastikan_trigger_tenant($pdo);
         migrasi_perusahaan($pdo);
 
@@ -298,7 +410,8 @@ function ensure_index(PDO $pdo, string $nama, string $tabel, string $kolom): voi
 function pastikan_trigger_tenant(PDO $pdo): void
 {
     $pakaiId = ['users', 'projects', 'lokasi', 'pekerjaan', 'progress_log',
-                'absensi', 'harga_satuan', 'jadwal', 'laporan_kerja'];
+                'absensi', 'harga_satuan', 'jadwal', 'laporan_kerja', 'harga_satuan_pekerja',
+                'pengajuan', 'pengajuan_item', 'kasbon', 'penggajian', 'penggajian_item'];
     foreach ($pakaiId as $tabel) {
         $pdo->exec(
             'CREATE TRIGGER IF NOT EXISTS trg_' . $tabel . '_tenant AFTER INSERT ON ' . $tabel . '
@@ -318,6 +431,65 @@ function pastikan_trigger_tenant(PDO $pdo): void
             WHERE rowid = NEW.rowid;
          END'
     );
+}
+
+/**
+ * Memindahkan status penagihan model LAMA (per item pekerjaan) menjadi
+ * data pengajuan yang sederhana, supaya riwayat tidak hilang.
+ * Hanya dijalankan sekali (kalau tabel pengajuan masih kosong).
+ */
+function migrasi_tagihan_lama(PDO $pdo): void
+{
+    if ((int) $pdo->query('SELECT COUNT(*) FROM pengajuan')->fetchColumn() > 0) {
+        return;
+    }
+    $rows = $pdo->query(
+        "SELECT id, project_id, nama, satuan, harga_jasa, volume, volume_realisasi, perusahaan_id,
+                tagih_status, tagih_diajukan_tanggal, tagih_dibayar_tanggal
+         FROM pekerjaan WHERE tagih_status IN ('diajukan','dibayar')"
+    )->fetchAll();
+    if (!$rows) {
+        return;
+    }
+
+    $perProject = [];
+    foreach ($rows as $r) {
+        $perProject[(int) $r['project_id']][] = $r;
+    }
+    $insP = $pdo->prepare('INSERT INTO pengajuan (nomor, project_id, tanggal, status, tanggal_bayar, catatan, perusahaan_id)
+                           VALUES (?,?,?,?,?,?,?)');
+    $insI = $pdo->prepare('INSERT INTO pengajuan_item (pengajuan_id, pekerjaan_id, volume, harga_jasa, satuan, nama_item, perusahaan_id)
+                           VALUES (?,?,?,?,?,?,?)');
+
+    foreach ($perProject as $projectId => $items) {
+        $status = 'diajukan';
+        $tanggal = date('Y-m-d');
+        $bayar = '';
+        foreach ($items as $it) {
+            if ($it['tagih_status'] === 'dibayar') {
+                $status = 'dibayar';
+            }
+            if (($it['tagih_diajukan_tanggal'] ?? '') !== '') {
+                $tanggal = (string) $it['tagih_diajukan_tanggal'];
+            }
+            if (($it['tagih_dibayar_tanggal'] ?? '') !== '') {
+                $bayar = (string) $it['tagih_dibayar_tanggal'];
+            }
+        }
+        $insP->execute(['', $projectId, $tanggal, $status, $bayar,
+            'Dipindahkan otomatis dari status penagihan versi lama.', (int) ($items[0]['perusahaan_id'] ?? 0)]);
+        $pengajuanId = (int) $pdo->lastInsertId();
+
+        foreach ($items as $it) {
+            $vol = (float) $it['volume_realisasi'] > 0 ? (float) $it['volume_realisasi'] : (float) $it['volume'];
+            if ($vol <= 0) {
+                continue;
+            }
+            $insI->execute([$pengajuanId, (int) $it['id'], $vol, (float) $it['harga_jasa'],
+                (string) $it['satuan'], (string) $it['nama'], (int) ($it['perusahaan_id'] ?? 0)]);
+            $pdo->prepare('UPDATE pekerjaan SET tagih_volume = ? WHERE id = ?')->execute([$vol, (int) $it['id']]);
+        }
+    }
 }
 
 /**
@@ -344,7 +516,9 @@ function migrasi_perusahaan(PDO $pdo): void
 
     // Data lama (perusahaan_id = 0) dipindahkan ke perusahaan pertama.
     foreach (['users', 'projects', 'lokasi', 'pekerjaan', 'pekerjaan_pekerja',
-              'progress_log', 'absensi', 'harga_satuan', 'jadwal', 'laporan_kerja'] as $tabel) {
+              'progress_log', 'absensi', 'harga_satuan', 'jadwal', 'laporan_kerja',
+              'harga_satuan_pekerja', 'pengajuan', 'pengajuan_item',
+              'kasbon', 'penggajian', 'penggajian_item'] as $tabel) {
         $pdo->prepare('UPDATE ' . $tabel . ' SET perusahaan_id = ? WHERE perusahaan_id = 0 OR perusahaan_id IS NULL')
             ->execute([$perusahaanId]);
     }

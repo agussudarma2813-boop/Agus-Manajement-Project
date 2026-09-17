@@ -1066,6 +1066,13 @@ function rekap_pengajuan(array $f = []): array
                 'upah_selesai' => 0.0,
                 'upah_berjalan' => 0.0,
                 'item' => [],
+                'tagih' => [
+                    'belum' => ['item' => 0, 'nilai' => 0.0],
+                    'diajukan' => ['item' => 0, 'nilai' => 0.0],
+                    'dibayar' => ['item' => 0, 'nilai' => 0.0],
+                ],
+                'nilai_diajukan_volume' => 0.0,
+                'nilai_sisa_volume' => 0.0,
             ];
         }
         $s = nilai_pekerjaan_summary($pj);
@@ -1076,8 +1083,35 @@ function rekap_pengajuan(array $f = []): array
         $per[$pid]['nilai_diajukan'] += $s['nilai_jasa'];
         $per[$pid]['upah_selesai'] += $s['upah_cair'];
         $per[$pid]['upah_berjalan'] += $s['upah_berjalan'];
+
+        // Ringkasan penagihan: sudah diajukan (dari pengajuan) & sisa
         $per[$pid]['item'][] = $pj + $s;
     }
+
+    // Status penagihan diambil dari data pengajuan (model sederhana)
+    foreach ($per as $pid => &$r) {
+        $st = db()->prepare(
+            "SELECT peng.status, COALESCE(SUM(i.volume * i.harga_jasa),0) AS nilai, COUNT(DISTINCT peng.id) AS jml
+             FROM pengajuan peng JOIN pengajuan_item i ON i.pengajuan_id = peng.id
+             WHERE peng.project_id = ? AND peng.perusahaan_id = ?
+             GROUP BY peng.status"
+        );
+        $st->execute([$pid, tenant_id()]);
+        foreach ($st->fetchAll() as $row) {
+            $kunci = $row['status'] === 'dibayar' ? 'dibayar' : 'diajukan';
+            $r['tagih'][$kunci]['nilai'] += (float) $row['nilai'];
+            $r['tagih'][$kunci]['item'] += (int) $row['jml'];
+            $r['nilai_diajukan_volume'] += (float) $row['nilai'];
+        }
+        foreach ($r['item'] as $it) {
+            $dasar = tagih_dasar($it);
+            $sisa = max(0.0, $dasar - (float) ($it['tagih_volume'] ?? 0));
+            $r['nilai_sisa_volume'] += $sisa * (float) $it['harga_jasa'];
+        }
+        $r['tagih']['belum']['nilai'] = $r['nilai_sisa_volume'];
+        $r['tagih']['belum']['item'] = count(array_filter($r['item'], fn($it) => tagih_sisa($it) > 0));
+    }
+    unset($r);
 
     // upah harian (absensi) per project untuk hitung margin
     foreach ($per as $pid => &$r) {
@@ -1499,13 +1533,81 @@ function auto_absensi(int $userId, string $tanggal, int $projectId, int $pekerja
     return $ins->rowCount() > 0;
 }
 
-/** Tarif upah per satuan untuk seorang pekerja pada sebuah pekerjaan */
+/**
+ * Tarif upah per satuan untuk seorang pekerja pada sebuah pekerjaan.
+ *
+ * Urutan prioritas:
+ *   1. tarif khusus per pekerja pada pekerjaan itu (pekerjaan_pekerja.harga_upah_override)
+ *   2. tarif khusus per pekerja dari MASTER harga satuan item tersebut
+ *      (otomatis tersinkron: ubah di master -> ikut terpakai di semua pekerjaan)
+ *   3. upah dasar item (pekerjaan.harga_upah)
+ */
 function tarif_upah(array $pekerjaan, int $userId): float
 {
     $st = db()->prepare('SELECT harga_upah_override FROM pekerjaan_pekerja WHERE pekerjaan_id = ? AND user_id = ?');
     $st->execute([(int) $pekerjaan['id'], $userId]);
     $override = (float) $st->fetchColumn();
-    return $override > 0 ? $override : (float) ($pekerjaan['harga_upah'] ?? 0);
+    if ($override > 0) {
+        return $override;
+    }
+
+    $masterId = (int) ($pekerjaan['harga_satuan_id'] ?? 0);
+    if ($masterId > 0) {
+        $khusus = tarif_khusus_master($masterId, $userId);
+        if ($khusus > 0) {
+            return $khusus;
+        }
+    }
+
+    return (float) ($pekerjaan['harga_upah'] ?? 0);
+}
+
+/** Tarif khusus seorang pekerja pada satu item master (0 = tidak ada, pakai upah dasar) */
+function tarif_khusus_master(int $hargaSatuanId, int $userId): float
+{
+    static $cache = [];
+    $kunci = $hargaSatuanId . '-' . $userId;
+    if (array_key_exists($kunci, $cache)) {
+        return $cache[$kunci];
+    }
+    $st = db()->prepare('SELECT harga_upah FROM harga_satuan_pekerja WHERE harga_satuan_id = ? AND user_id = ? AND perusahaan_id = ?');
+    $st->execute([$hargaSatuanId, $userId, tenant_id()]);
+    return $cache[$kunci] = (float) $st->fetchColumn();
+}
+
+/** Semua tarif khusus sebuah item master: [user_id => harga] */
+function tarif_khusus_daftar(int $hargaSatuanId): array
+{
+    $st = db()->prepare('SELECT user_id, harga_upah FROM harga_satuan_pekerja WHERE harga_satuan_id = ? AND perusahaan_id = ?');
+    $st->execute([$hargaSatuanId, tenant_id()]);
+    $out = [];
+    foreach ($st->fetchAll() as $r) {
+        $out[(int) $r['user_id']] = (float) $r['harga_upah'];
+    }
+    return $out;
+}
+
+/** Menyimpan tarif khusus per pekerja untuk sebuah item master (0 = hapus/ikut dasar) */
+function simpan_tarif_khusus(int $hargaSatuanId, array $tarifPerUser): void
+{
+    $valid = [];
+    foreach (all_users() as $p) {
+        if ($p['role'] !== 'admin') {
+            $valid[(int) $p['id']] = true;
+        }
+    }
+
+    db()->prepare('DELETE FROM harga_satuan_pekerja WHERE harga_satuan_id = ? AND perusahaan_id = ?')
+        ->execute([$hargaSatuanId, tenant_id()]);
+    $ins = db()->prepare('INSERT OR IGNORE INTO harga_satuan_pekerja (harga_satuan_id, user_id, harga_upah, perusahaan_id) VALUES (?,?,?,?)');
+    foreach ($tarifPerUser as $uid => $nominal) {
+        $uid = (int) $uid;
+        $nominal = parse_money((string) $nominal);
+        if ($uid <= 0 || $nominal <= 0 || !isset($valid[$uid])) {
+            continue;
+        }
+        $ins->execute([$hargaSatuanId, $uid, $nominal, tenant_id()]);
+    }
 }
 
 /** Pastikan pekerja punya baris penugasan pada pekerjaan (untuk perhitungan upah) */
@@ -1640,4 +1742,556 @@ function opsi_pekerjaan_laporan(int $projectId, int $userId): array
     }
 
     return ['items' => $items, 'master' => $master];
+}
+
+/* ==========================================================================
+   PENGAJUAN TAGIHAN (SEDERHANA)
+   --------------------------------------------------------------------------
+   Satu pengajuan = satu project, berisi beberapa sub pekerjaan dengan volume
+   yang diajukan. Volume boleh sebagian: sisa = dasar − tagih_volume, sehingga
+   pengajuan berikutnya tinggal mengisi sisanya sampai kontrak habis.
+   ========================================================================== */
+
+/** Volume yang jadi dasar tagihan: volume akhir bila ada, kalau tidak volume kontrak */
+function tagih_dasar(array $pj): float
+{
+    $real = (float) ($pj['volume_realisasi'] ?? 0);
+    if ($real > 0) {
+        return $real;
+    }
+    return (float) ($pj['volume'] ?? 0);
+}
+
+/** Sisa volume yang belum diajukan */
+function tagih_sisa(array $pj): float
+{
+    return max(0.0, tagih_dasar($pj) - (float) ($pj['tagih_volume'] ?? 0));
+}
+
+/** Sumber dasar tagihan dalam teks: 'volume akhir' atau 'volume kontrak' */
+function tagih_dasar_dari(array $pj): string
+{
+    return (float) ($pj['volume_realisasi'] ?? 0) > 0 ? 'volume akhir' : 'volume kontrak';
+}
+
+/** Sub pekerjaan sebuah project + info tagihan (untuk form pengajuan) */
+function item_untuk_pengajuan(int $projectId): array
+{
+    $rows = fetch_pekerjaan(['project_id' => $projectId, 'semua_item' => true]);
+    $out = [];
+    foreach ($rows as $pj) {
+        $pj['dasar'] = tagih_dasar($pj);
+        $pj['sisa'] = tagih_sisa($pj);
+        $pj['nilai_sisa'] = $pj['sisa'] * (float) $pj['harga_jasa'];
+        $pj['dasar_dari'] = tagih_dasar_dari($pj);
+        $out[] = $pj;
+    }
+    usort($out, fn($a, $b) => strcmp($a['nama'], $b['nama']));
+    return $out;
+}
+
+/** Hitung ulang total volume yang sudah diajukan pada sebuah pekerjaan */
+function tagih_sync_volume(int $pekerjaanId): float
+{
+    $st = db()->prepare('SELECT COALESCE(SUM(volume),0) FROM pengajuan_item WHERE pekerjaan_id = ? AND perusahaan_id = ?');
+    $st->execute([$pekerjaanId, tenant_id()]);
+    $vol = (float) $st->fetchColumn();
+    db()->prepare('UPDATE pekerjaan SET tagih_volume = ? WHERE id = ? AND perusahaan_id = ?')
+        ->execute([$vol, $pekerjaanId, tenant_id()]);
+    return $vol;
+}
+
+/** Daftar pengajuan (dengan nilai total & jumlah item) */
+function fetch_pengajuan(array $f = []): array
+{
+    $a = [];
+    $w = [tenant_where('peng', $a)];
+    if (!empty($f['project_id'])) {
+        $w[] = 'peng.project_id = ?';
+        $a[] = (int) $f['project_id'];
+    }
+    if (!empty($f['status'])) {
+        $w[] = 'peng.status = ?';
+        $a[] = (string) $f['status'];
+    }
+    if (!empty($f['dari'])) {
+        $w[] = 'peng.tanggal >= ?';
+        $a[] = (string) $f['dari'];
+    }
+    if (!empty($f['sampai'])) {
+        $w[] = 'peng.tanggal <= ?';
+        $a[] = (string) $f['sampai'];
+    }
+    $sql = 'SELECT peng.*, pr.nama AS project_nama, pr.kode AS project_kode,
+                   (SELECT COUNT(*) FROM pengajuan_item i WHERE i.pengajuan_id = peng.id) AS jml_item,
+                   (SELECT COALESCE(SUM(i.volume * i.harga_jasa),0) FROM pengajuan_item i WHERE i.pengajuan_id = peng.id) AS nilai,
+                   (SELECT COALESCE(SUM(i.volume),0) FROM pengajuan_item i WHERE i.pengajuan_id = peng.id) AS volume
+            FROM pengajuan peng
+            JOIN projects pr ON pr.id = peng.project_id
+            WHERE ' . implode(' AND ', $w) . '
+            ORDER BY peng.tanggal DESC, peng.id DESC';
+    $st = db()->prepare($sql);
+    $st->execute($a);
+    return $st->fetchAll();
+}
+
+function get_pengajuan(int $id): ?array
+{
+    $st = db()->prepare(
+        'SELECT peng.*, pr.nama AS project_nama, pr.kode AS project_kode, pr.pelaksana_id AS project_pelaksana,
+                pr.mulai AS project_mulai, pr.target_selesai AS project_target, u.nama AS pembuat_nama
+         FROM pengajuan peng
+         JOIN projects pr ON pr.id = peng.project_id
+         LEFT JOIN users u ON u.id = peng.created_by
+         WHERE peng.id = ? AND peng.perusahaan_id = ?'
+    );
+    $st->execute([$id, tenant_id()]);
+    return $st->fetch() ?: null;
+}
+
+/** Item di dalam sebuah pengajuan */
+function item_pengajuan(int $pengajuanId): array
+{
+    $st = db()->prepare(
+        'SELECT i.*, pj.satuan AS satuan_pekerjaan
+         FROM pengajuan_item i
+         LEFT JOIN pekerjaan pj ON pj.id = i.pekerjaan_id
+         WHERE i.pengajuan_id = ? AND i.perusahaan_id = ?
+         ORDER BY i.nama_item'
+    );
+    $st->execute([$pengajuanId, tenant_id()]);
+    return $st->fetchAll();
+}
+
+/** Ringkasan tagihan per project: sudah diajukan (per status) & masih sisa */
+function ringkasan_tagihan_project(int $projectId): array
+{
+    $items = item_untuk_pengajuan($projectId);
+    $out = [
+        'item' => count($items),
+        'nilai_kontrak' => 0.0,
+        'nilai_dasar' => 0.0,
+        'nilai_diajukan' => 0.0,
+        'nilai_sisa' => 0.0,
+        'nilai_dibayar' => 0.0,
+        'nilai_menunggu' => 0.0,
+    ];
+    foreach ($items as $pj) {
+        $out['nilai_kontrak'] += (float) $pj['volume'] * (float) $pj['harga_jasa'];
+        $out['nilai_dasar'] += $pj['dasar'] * (float) $pj['harga_jasa'];
+        $out['nilai_diajukan'] += (float) $pj['tagih_volume'] * (float) $pj['harga_jasa'];
+        $out['nilai_sisa'] += $pj['nilai_sisa'];
+    }
+    $st = db()->prepare(
+        "SELECT peng.status, COALESCE(SUM(i.volume * i.harga_jasa),0) AS nilai
+         FROM pengajuan peng JOIN pengajuan_item i ON i.pengajuan_id = peng.id
+         WHERE peng.project_id = ? AND peng.perusahaan_id = ?
+         GROUP BY peng.status"
+    );
+    $st->execute([$projectId, tenant_id()]);
+    foreach ($st->fetchAll() as $r) {
+        if ($r['status'] === 'dibayar') {
+            $out['nilai_dibayar'] += (float) $r['nilai'];
+        } else {
+            $out['nilai_menunggu'] += (float) $r['nilai'];
+        }
+    }
+    return $out;
+}
+
+/** Daftar project yang punya pengajuan (untuk export per sheet) */
+function project_berpengajuan(): array
+{
+    $st = db()->prepare(
+        'SELECT DISTINCT pr.* FROM pengajuan peng JOIN projects pr ON pr.id = peng.project_id
+         WHERE peng.perusahaan_id = ? ORDER BY pr.nama'
+    );
+    $st->execute([tenant_id()]);
+    return $st->fetchAll();
+}
+
+/* ==========================================================================
+   GAJI, KASBON & TUTUP BUKU
+   --------------------------------------------------------------------------
+   - Periode gaji mengikuti "tanggal tutup buku" perusahaan (mis. 25):
+       26 <bulan lalu>  s/d  25 <bulan ini>
+   - Gaji seharusnya = (hari kerja harian × tarif) + upah borongan (volume × tarif)
+     — memakai mesin hitung upah yang sudah ada agar konsisten dengan rekap upah.
+   - Kasbon dipotong dari gaji: kasbon yang belum dipotong & tanggalnya <= periode_sampai.
+   - Gaji diterima = gaji seharusnya − kasbon.
+   ========================================================================== */
+
+/** Tanggal tutup buku perusahaan aktif (0 = tidak dipakai) */
+function tutup_buku_tgl(): int
+{
+    $p = tenant();
+    $tgl = (int) ($p['tutup_buku_tgl'] ?? 0);
+    return ($tgl >= 1 && $tgl <= 28) ? $tgl : 0;
+}
+
+/**
+ * Periode gaji berdasarkan tanggal tutup buku.
+ *
+ * @param string $acuan  tanggal acuan (default hari ini)
+ * @param int    $geser  -1 = periode sebelumnya
+ * @return array ['dari' => 'YYYY-MM-DD', 'sampai' => 'YYYY-MM-DD', 'label' => string, 'tutup' => int]
+ */
+function periode_gaji(string $acuan = '', int $geser = 0): array
+{
+    $acuan = valid_tanggal($acuan) ?: date('Y-m-d');
+    $tutup = tutup_buku_tgl();
+    $ts = strtotime($acuan);
+
+    if ($tutup === 0) {
+        // Tanpa tutup buku: periode = bulan kalender penuh
+        $mulai = date('Y-m-01', strtotime(($geser >= 0 ? '+' : '') . $geser . ' month', $ts));
+        $sampai = date('Y-m-t', strtotime($mulai));
+        return [
+            'dari' => $mulai,
+            'sampai' => $sampai,
+            'tutup' => 0,
+            'label' => tgl($mulai) . ' – ' . tgl($sampai),
+        ];
+    }
+
+    if ((int) date('j', $ts) > $tutup) {
+        $sampai = date('Y-m-' . str_pad((string) $tutup, 2, '0', STR_PAD_LEFT), strtotime('+1 month', $ts));
+    } else {
+        $sampai = date('Y-m-' . str_pad((string) $tutup, 2, '0', STR_PAD_LEFT), $ts);
+    }
+    $dari = date('Y-m-d', strtotime($sampai . ' -1 month +1 day'));
+
+    if ($geser !== 0) {
+        // geser negatif = periode sebelumnya (jangan dibalik tandanya!)
+        $sampai = date('Y-m-d', strtotime($sampai . ' ' . $geser . ' month'));
+        $dari = date('Y-m-d', strtotime($sampai . ' -1 month +1 day'));
+    }
+
+    return [
+        'dari' => $dari,
+        'sampai' => $sampai,
+        'tutup' => $tutup,
+        'label' => tgl($dari) . ' – ' . tgl($sampai) . ' (tutup buku tgl ' . $tutup . ')',
+    ];
+}
+
+/** Kasbon yang belum dipotong dari gaji seorang pekerja */
+function kasbon_aktif(int $userId, string $sampai = ''): array
+{
+    $sql = 'SELECT * FROM kasbon WHERE user_id = ? AND perusahaan_id = ? AND penggajian_id IS NULL';
+    $args = [$userId, tenant_id()];
+    if ($sampai !== '') {
+        $sql .= ' AND tanggal <= ?';
+        $args[] = $sampai;
+    }
+    $sql .= ' ORDER BY tanggal, id';
+    $st = db()->prepare($sql);
+    $st->execute($args);
+    return $st->fetchAll();
+}
+
+function kasbon_total_aktif(int $userId, string $sampai = ''): float
+{
+    $total = 0.0;
+    foreach (kasbon_aktif($userId, $sampai) as $k) {
+        $total += (float) $k['nominal'];
+    }
+    return $total;
+}
+
+/**
+ * Hitung gaji seharusnya + kasbon + gaji diterima seorang pekerja pada sebuah periode.
+ *
+ * @return array [
+ *   'hari' => float (hari kerja yang digaji),
+ *   'upah_harian' => float,   'rincian_harian' => array,
+ *   'upah_borongan' => float, 'rincian_borongan' => array,
+ *   'total_gaji' => float, 'kasbon' => array, 'total_kasbon' => float, 'diterima' => float,
+ *   'skema' => string, 'sudah' => ?array (penggajian yang sudah ada untuk periode itu)
+ * ]
+ */
+function hitung_gaji(int $userId, string $dari, string $sampai): array
+{
+    $st = db()->prepare('SELECT * FROM users WHERE id = ? AND perusahaan_id = ?');
+    $st->execute([$userId, tenant_id()]);
+    $orang = $st->fetch() ?: [];
+
+    // 1. Hari kerja harian (dari absensi) — hanya untuk skema harian
+    $rincianHarian = [];
+    if (($orang['skema'] ?? 'harian') === 'harian') {
+        $st = db()->prepare(
+            'SELECT a.tanggal, a.hari, a.upah, pr.nama AS project_nama
+             FROM absensi a LEFT JOIN projects pr ON pr.id = a.project_id
+             WHERE a.user_id = ? AND a.perusahaan_id = ? AND a.tanggal >= ? AND a.tanggal <= ?
+             ORDER BY a.tanggal'
+        );
+        $st->execute([$userId, tenant_id(), $dari, $sampai]);
+        foreach ($st->fetchAll() as $r) {
+            $rincianHarian[] = $r;
+        }
+    }
+    $hari = array_sum(array_map(fn($r) => (float) $r['hari'], $rincianHarian));
+    $upahHarian = array_sum(array_map(fn($r) => (float) $r['hari'] * (float) $r['upah'], $rincianHarian));
+
+    // 2. Upah borongan (dari laporan hasil kerja) — hanya untuk skema borongan
+    $rincianBorongan = [];
+    $upahBorongan = 0.0;
+    if (($orang['skema'] ?? '') === 'borongan') {
+        $st = db()->prepare(
+            'SELECT lk.tanggal, lk.volume, lk.upah_satuan, pj.nama AS pekerjaan_nama, pj.satuan
+             FROM laporan_kerja lk JOIN pekerjaan pj ON pj.id = lk.pekerjaan_id
+             WHERE lk.user_id = ? AND lk.perusahaan_id = ? AND lk.tanggal >= ? AND lk.tanggal <= ?
+             ORDER BY lk.tanggal, pj.nama'
+        );
+        $st->execute([$userId, tenant_id(), $dari, $sampai]);
+        foreach ($st->fetchAll() as $r) {
+            $r['nilai'] = (float) $r['volume'] * (float) $r['upah_satuan'];
+            $upahBorongan += $r['nilai'];
+            $rincianBorongan[] = $r;
+        }
+    }
+
+    $totalGaji = $upahHarian + $upahBorongan;
+
+    /* Kasbon dipotong HANYA sebatas upah yang tersedia (urut dari yang paling lama).
+       Kasbon yang tidak muat tetap AKTIF dan akan dipotong pada periode berikutnya —
+       ini penting supaya kasbon tidak "hilang" saat upah pekerja kecil/kosong. */
+    $kasbonSemua = kasbon_aktif($userId, $sampai);
+    $kasbon = [];          // kasbon yang benar-benar dipotong (potong penuh / sebagian)
+    $totalKasbon = 0.0;
+    $sisaUpah = $totalGaji;
+    foreach ($kasbonSemua as $k) {
+        $nominal = (float) $k['nominal'];
+        if ($nominal <= 0 || $sisaUpah <= 0) {
+            continue;
+        }
+        // Potong sebesar yang muat. Bila tidak cukup, sisanya dibuat baris kasbon baru
+        // (kasbon asli ditandai selesai dipotong) supaya pembayarannya bertahap & jelas.
+        $potong = min($nominal, $sisaUpah);
+        $kasbon[] = ['kasbon' => $k, 'potong' => $potong, 'sisa' => max(0.0, $nominal - $potong)];
+        $totalKasbon += $potong;
+        $sisaUpah -= $potong;
+    }
+    $totalKasbonSemua = array_sum(array_map(fn($k) => (float) $k['nominal'], $kasbonSemua));
+
+    // Sudah pernah digaji untuk periode ini?
+    $st = db()->prepare('SELECT * FROM penggajian WHERE user_id = ? AND periode_dari = ? AND periode_sampai = ? AND perusahaan_id = ?');
+    $st->execute([$userId, $dari, $sampai, tenant_id()]);
+    $sudah = $st->fetch() ?: null;
+
+    return [
+        'orang' => $orang,
+        'skema' => (string) ($orang['skema'] ?? 'harian'),
+        'hari' => $hari,
+        'upah_harian' => $upahHarian,
+        'rincian_harian' => $rincianHarian,
+        'upah_borongan' => $upahBorongan,
+        'rincian_borongan' => $rincianBorongan,
+        'total_gaji' => $totalGaji,
+        'kasbon' => $kasbon,
+        'kasbon_semua' => $kasbonSemua,
+        'total_kasbon' => $totalKasbon,
+        'total_kasbon_semua' => $totalKasbonSemua,
+        'kasbon_tertahan' => max(0.0, $totalKasbonSemua - $totalKasbon),
+        'diterima' => max(0.0, $totalGaji - $totalKasbon),
+        'sudah' => $sudah,
+    ];
+}
+
+/** Buat penggajian (snapshot) untuk seorang pekerja; kasbon yang dipotong ikut ditandai */
+function buat_penggajian(int $userId, string $dari, string $sampai, int $olehUser): ?int
+{
+    $g = hitung_gaji($userId, $dari, $sampai);
+    if (!$g['orang']) {
+        return null;
+    }
+    if ($g['sudah']) {
+        return (int) $g['sudah']['id']; // sudah ada, jangan dobel
+    }
+    // Tanpa upah pada periode ini tidak ada yang dibayarkan (kasbon tetap aktif)
+    if ($g['total_gaji'] <= 0) {
+        return null;
+    }
+
+    $st = db()->prepare('SELECT COUNT(*) FROM penggajian WHERE perusahaan_id = ?');
+    $st->execute([tenant_id()]);
+    $urut = (int) $st->fetchColumn() + 1;
+    $nomor = 'GJ-' . date('ym', strtotime($sampai)) . '-' . str_pad((string) $urut, 3, '0', STR_PAD_LEFT);
+
+    db()->prepare(
+        "INSERT INTO penggajian (nomor, user_id, periode_dari, periode_sampai, hari_kerja, upah_harian,
+             upah_borongan, total_gaji, total_kasbon, total_dibayar, status, catatan, created_by, perusahaan_id)
+         VALUES (?,?,?,?,?,?,?,?,?,?,'belum','',?,?)"
+    )->execute([
+        $nomor, $userId, $dari, $sampai,
+        $g['hari'], $g['upah_harian'], $g['upah_borongan'], $g['total_gaji'], $g['total_kasbon'], $g['diterima'],
+        $olehUser, tenant_id(),
+    ]);
+    $id = (int) db()->lastInsertId();
+
+    $ins = db()->prepare(
+        'INSERT INTO penggajian_item (penggajian_id, jenis, keterangan, volume, satuan, nilai, perusahaan_id)
+         VALUES (?,?,?,?,?,?,?)'
+    );
+    foreach ($g['rincian_harian'] as $r) {
+        $ins->execute([$id, 'harian', 'Kerja ' . tgl($r['tanggal']) . ($r['project_nama'] ? ' — ' . $r['project_nama'] : ''),
+            (float) $r['hari'], 'hari', (float) $r['hari'] * (float) $r['upah'], tenant_id()]);
+    }
+    foreach ($g['rincian_borongan'] as $r) {
+        $ins->execute([$id, 'borongan', $r['pekerjaan_nama'] . ' (' . tgl($r['tanggal']) . ')',
+            (float) $r['volume'], (string) $r['satuan'], (float) $r['nilai'], tenant_id()]);
+    }
+    $updKasbon = db()->prepare('UPDATE kasbon SET penggajian_id = ? WHERE id = ? AND perusahaan_id = ?');
+    $insKasbon = db()->prepare(
+        'INSERT INTO kasbon (user_id, tanggal, nominal, keterangan, created_by, perusahaan_id)
+         VALUES (?,?,?,?,?,?)'
+    );
+    foreach ($g['kasbon'] as $p) {
+        $k = $p['kasbon'];
+        $ins->execute([$id, 'kasbon',
+            'Kasbon ' . tgl($k['tanggal']) . ($k['keterangan'] !== '' ? ' — ' . $k['keterangan'] : '')
+                . ((float) $k['nominal'] > $p['potong'] ? ' (dipotong sebagian)' : ''),
+            0, '', -1 * $p['potong'], tenant_id()]);
+        $updKasbon->execute([$id, (int) $k['id'], tenant_id()]);
+        if ($p['sisa'] > 0) {
+            // sisa kasbon yang belum terpotong -> jadi kasbon aktif untuk periode berikutnya
+            $insKasbon->execute([
+                $userId, $k['tanggal'], $p['sisa'],
+                ($k['keterangan'] !== '' ? $k['keterangan'] . ' — ' : '') . 'sisa belum terpotong',
+                $olehUser, tenant_id(),
+            ]);
+        }
+    }
+    return $id;
+}
+
+function fetch_penggajian(array $f = [], int $limit = 300): array
+{
+    $w = [];
+    $a = [];
+    $u = current_user();
+    $w[] = tenant_where('g', $a);
+    if ($u && $u['role'] === 'pekerja' && empty($f['semua_orang'])) {
+        $w[] = 'g.user_id = ?';
+        $a[] = (int) $u['id'];
+    } elseif (!empty($f['user_id'])) {
+        $w[] = 'g.user_id = ?';
+        $a[] = (int) $f['user_id'];
+    }
+    if (!empty($f['status'])) {
+        $w[] = 'g.status = ?';
+        $a[] = (string) $f['status'];
+    }
+    if (!empty($f['dari'])) {
+        $w[] = 'g.periode_sampai >= ?';
+        $a[] = (string) $f['dari'];
+    }
+    if (!empty($f['sampai'])) {
+        $w[] = 'g.periode_sampai <= ?';
+        $a[] = (string) $f['sampai'];
+    }
+    $sql = 'SELECT g.*, us.nama AS pekerja_nama, us.jabatan, us.skema
+            FROM penggajian g JOIN users us ON us.id = g.user_id
+            WHERE ' . implode(' AND ', $w) . '
+            ORDER BY g.periode_sampai DESC, us.nama LIMIT ' . (int) $limit;
+    $st = db()->prepare($sql);
+    $st->execute($a);
+    return $st->fetchAll();
+}
+
+function get_penggajian(int $id): ?array
+{
+    $st = db()->prepare(
+        'SELECT g.*, us.nama AS pekerja_nama, us.jabatan, us.skema, us.upah_harian AS tarif_harian, cb.nama AS pembuat_nama
+         FROM penggajian g JOIN users us ON us.id = g.user_id
+         LEFT JOIN users cb ON cb.id = g.created_by
+         WHERE g.id = ? AND g.perusahaan_id = ?'
+    );
+    $st->execute([$id, tenant_id()]);
+    return $st->fetch() ?: null;
+}
+
+function item_penggajian(int $id): array
+{
+    $st = db()->prepare('SELECT * FROM penggajian_item WHERE penggajian_id = ? AND perusahaan_id = ? ORDER BY jenis, id');
+    $st->execute([$id, tenant_id()]);
+    return $st->fetchAll();
+}
+
+/** Ringkasan gaji sebuah periode (untuk kartu & daftar) */
+function ringkasan_gaji(array $f = []): array
+{
+    $daftar = fetch_penggajian($f, 9999);
+    $out = ['jumlah' => count($daftar), 'belum' => 0.0, 'dibayar' => 0.0, 'kasbon' => 0.0, 'belum_orang' => 0, 'dibayar_orang' => 0];
+    foreach ($daftar as $g) {
+        if ($g['status'] === 'dibayar') {
+            $out['dibayar'] += (float) $g['total_dibayar'];
+            $out['dibayar_orang']++;
+        } else {
+            $out['belum'] += (float) $g['total_dibayar'];
+            $out['belum_orang']++;
+        }
+        $out['kasbon'] += (float) $g['total_kasbon'];
+    }
+    return $out;
+}
+
+function fetch_kasbon(array $f = [], int $limit = 300): array
+{
+    $w = [];
+    $a = [];
+    $u = current_user();
+    $w[] = tenant_where('k', $a);
+    if ($u && $u['role'] === 'pekerja' && empty($f['semua_orang'])) {
+        $w[] = 'k.user_id = ?';
+        $a[] = (int) $u['id'];
+    } elseif (!empty($f['user_id'])) {
+        $w[] = 'k.user_id = ?';
+        $a[] = (int) $f['user_id'];
+    }
+    if (!empty($f['dari'])) {
+        $w[] = 'k.tanggal >= ?';
+        $a[] = (string) $f['dari'];
+    }
+    if (!empty($f['sampai'])) {
+        $w[] = 'k.tanggal <= ?';
+        $a[] = (string) $f['sampai'];
+    }
+    $status = (string) ($f['status'] ?? '');
+    if ($status === 'aktif') {
+        $w[] = 'k.penggajian_id IS NULL';
+    } elseif ($status === 'dipotong') {
+        $w[] = 'k.penggajian_id IS NOT NULL';
+    }
+    $sql = 'SELECT k.*, us.nama AS pekerja_nama, us.jabatan, g.nomor AS gaji_nomor
+            FROM kasbon k JOIN users us ON us.id = k.user_id
+            LEFT JOIN penggajian g ON g.id = k.penggajian_id
+            WHERE ' . implode(' AND ', $w) . '
+            ORDER BY k.tanggal DESC, us.nama LIMIT ' . (int) $limit;
+    $st = db()->prepare($sql);
+    $st->execute($a);
+    return $st->fetchAll();
+}
+
+function get_kasbon(int $id): ?array
+{
+    $st = db()->prepare('SELECT * FROM kasbon WHERE id = ? AND perusahaan_id = ?');
+    $st->execute([$id, tenant_id()]);
+    return $st->fetch() ?: null;
+}
+
+/** Ringkasan kasbon untuk kartu halaman kasbon */
+function ringkasan_kasbon(array $f = []): array
+{
+    $daftar = fetch_kasbon($f, 9999);
+    $out = ['jumlah' => count($daftar), 'aktif' => 0.0, 'dipotong' => 0.0, 'orang' => []];
+    foreach ($daftar as $k) {
+        if ($k['penggajian_id'] === null) {
+            $out['aktif'] += (float) $k['nominal'];
+        } else {
+            $out['dipotong'] += (float) $k['nominal'];
+        }
+        $out['orang'][(int) $k['user_id']] = ($out['orang'][(int) $k['user_id']] ?? 0) + (float) $k['nominal'];
+    }
+    return $out;
 }

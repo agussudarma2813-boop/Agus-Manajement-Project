@@ -562,3 +562,161 @@
     }
   });
 })();
+
+/* Pengajuan: centang semua item untuk ubah status tagihan sekaligus */
+(function () {
+  var semua = document.querySelector('[data-tagih-semua]');
+  if (!semua) return;
+  var items = function () { return document.querySelectorAll('[data-tagih-item]'); };
+  semua.addEventListener('change', function () {
+    Array.prototype.forEach.call(items(), function (c) { c.checked = semua.checked; });
+  });
+  document.addEventListener('change', function (e) {
+    if (e.target.matches('[data-tagih-item]')) {
+      var total = items().length;
+      var dipilih = Array.prototype.filter.call(items(), function (c) { return c.checked; }).length;
+      semua.checked = total > 0 && dipilih === total;
+      semua.indeterminate = dipilih > 0 && dipilih < total;
+    }
+  });
+})();
+
+/* Master harga satuan: info langsung saat tarif khusus diisi */
+(function () {
+  var list = document.querySelector('.tarif-list');
+  if (!list) return;
+  var dasar = document.querySelector('#harga_upah');
+  if (!dasar) return;
+  var sync = function () {
+    var d = (dasar.value || '').replace(/[^0-9,.]/g, '');
+    d = parseFloat(d.replace(/\./g, '').replace(',', '.')) || 0;
+    Array.prototype.forEach.call(list.querySelectorAll('.tarif-input input'), function (i) {
+      var v = (i.value || '').replace(/[^0-9,.]/g, '');
+      var n = parseFloat(v.replace(/\./g, '').replace(',', '.')) || 0;
+      var sama = n > 0 && Math.abs(n - d) < 0.01;
+      i.style.borderColor = sama ? '#f59e0b' : '';
+      i.title = sama ? 'Sama dengan upah dasar — baris ini boleh dikosongkan' : '';
+    });
+  };
+  list.addEventListener('input', sync);
+  dasar.addEventListener('input', sync);
+  sync();
+})();
+
+/* Pengajuan sederhana: centang item, isi volume (default sisa), total langsung */
+(function () {
+  var form = document.querySelector('[data-pengajuan-form]');
+  if (!form) return;
+
+  var rupiah = function (n) { return 'Rp ' + Math.round(n).toLocaleString('id-ID'); };
+  var angka = function (s) {
+    s = (s || '').trim();
+    if (!s) return 0;
+    s = s.replace(/[^0-9,.]/g, '');
+    if (s.indexOf(',') >= 0) return parseFloat(s.replace(/\./g, '').replace(',', '.')) || 0;
+    if (/^\d{1,3}(\.\d{3})+$/.test(s)) return parseFloat(s.replace(/\./g, '')) || 0;
+    if ((s.match(/\./g) || []).length > 1) return parseFloat(s.replace(/\./g, '')) || 0;
+    return parseFloat(s) || 0;
+  };
+
+  var items = function () { return Array.prototype.slice.call(form.querySelectorAll('[data-pengajuan-item]')); };
+  var semua = form.querySelector('[data-pengajuan-semua]');
+  var totalOut = form.querySelector('[data-pengajuan-total]');
+  var info = form.querySelector('[data-pengajuan-info]');
+
+  var hitung = function () {
+    var total = 0, jml = 0;
+    items().forEach(function (c) {
+      var tr = c.closest('tr');
+      var volInput = tr.querySelector('[data-pengajuan-volume]');
+      var out = tr.querySelector('[data-pengajuan-nilai]');
+      if (!volInput || !out) return;
+      var vol = angka(volInput.value);
+      var harga = angka(volInput.dataset.harga);
+      var sisa = angka(volInput.dataset.sisa);
+      var nilai = c.checked ? vol * harga : 0;
+      out.textContent = c.checked && vol > 0 ? rupiah(nilai) : '—';
+      volInput.disabled = !c.checked;
+      if (c.checked) {
+        jml++;
+        total += nilai;
+        var lebih = vol > sisa + 0.001;
+        volInput.style.borderColor = lebih ? '#dc2626' : '';
+        volInput.title = lebih ? 'Melebihi sisa ' + sisa.toLocaleString('id-ID') : '';
+      } else {
+        volInput.style.borderColor = '';
+        volInput.title = '';
+      }
+    });
+    if (totalOut) {
+      totalOut.innerHTML = jml > 0
+        ? '<strong>' + jml + ' sub pekerjaan</strong> · total ' + rupiah(total) + ' ke perusahaan'
+        : 'Belum ada item dipilih.';
+    }
+    if (info) {
+      info.textContent = jml > 0
+        ? jml + ' sub pekerjaan akan diajukan (volume boleh sebagian).'
+        : 'Volume boleh sebagian — sisanya bisa diajukan lagi nanti.';
+    }
+    if (semua) {
+      var semuaItem = items();
+      var dipilih = semuaItem.filter(function (c) { return c.checked; }).length;
+      semua.checked = semuaItem.length > 0 && dipilih === semuaItem.length;
+      semua.indeterminate = dipilih > 0 && dipilih < semuaItem.length;
+    }
+  };
+
+  form.addEventListener('input', hitung);
+  form.addEventListener('change', function (e) {
+    if (e.target === semua) {
+      items().forEach(function (c) { c.checked = semua.checked; });
+    }
+    if (e.target.matches('[data-project-pilih]')) {
+      var url = new URL(window.location.href);
+      url.searchParams.set('project_id', e.target.value);
+      window.location.href = url.toString();
+      return;
+    }
+    hitung();
+  });
+  hitung();
+})();
+
+/* Gaji: centang banyak lalu tandai dibayar sekaligus */
+(function () {
+  var form = document.getElementById('daftar-gaji');
+  if (!form) return;
+  var semua = form.querySelector('[data-check-all]');
+  var info = form.querySelector('[data-gaji-info]');
+  var items = function () { return Array.prototype.slice.call(form.querySelectorAll('[data-gaji-item]')); };
+  var rupiah = function (n) { return 'Rp ' + Math.round(n).toLocaleString('id-ID'); };
+
+  var sync = function () {
+    var dipilih = items().filter(function (c) { return c.checked; });
+    items().forEach(function (c) {
+      var tr = c.closest('tr');
+      if (tr) tr.classList.toggle('is-picked', c.checked);
+    });
+    if (info) {
+      if (!dipilih.length) {
+        info.textContent = 'Belum ada yang dicentang.';
+      } else {
+        var nilai = dipilih.reduce(function (t, c) { return t + (parseFloat(c.dataset.nilai) || 0); }, 0);
+        var belum = dipilih.filter(function (c) { return c.dataset.status !== 'dibayar'; }).length;
+        info.textContent = dipilih.length + ' gaji dicentang (' + belum + ' belum dibayar) · total ' + rupiah(nilai);
+      }
+    }
+    if (semua) {
+      var all = items();
+      semua.checked = all.length > 0 && dipilih.length === all.length;
+      semua.indeterminate = dipilih.length > 0 && dipilih.length < all.length;
+    }
+  };
+  form.addEventListener('change', function (e) {
+    if (e.target === semua) {
+      items().forEach(function (c) { c.checked = semua.checked; });
+    }
+    sync();
+  });
+  sync();
+})();

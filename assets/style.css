@@ -662,3 +662,44 @@ table.items-batch-tbl input[name^="upd_volume"] { width: 96px; }
   margin-top: 10px; padding: 14px; border: 1px solid #fecaca; border-radius: 10px;
   background: #fff6f6; max-width: 380px;
 }
+
+/* Tarif borongan khusus per pekerja */
+.tarif-list {
+  display: flex; flex-direction: column; gap: 10px;
+  max-height: 340px; overflow-y: auto;
+  padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: #fbfcfe;
+}
+.tarif-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px; background: #fff; border: 1px solid var(--line); border-radius: 10px;
+}
+.tarif-row:hover { border-color: #c7d2fe; }
+.tarif-row .grow { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.tarif-row .grow small { font-size: 11.5px; }
+.tarif-input { display: flex; flex-direction: column; gap: 3px; width: 168px; flex: 0 0 auto; }
+.tarif-input input { padding: 7px 9px; font-size: 13px; }
+
+/* Status penagihan */
+.tagih-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 650; }
+.tagih-belum { color: #64748b; }
+.tagih-diajukan { color: #1d4ed8; }
+.tagih-dibayar { color: #15803d; }
+.aksi-massal {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 12px 20px; background: #f8fafc; border-bottom: 1px solid var(--line);
+}
+.aksi-massal form { display: inline-flex; gap: 8px; align-items: center; }
+
+@media (max-width: 860px) {
+  .tarif-row { flex-wrap: wrap; }
+  .tarif-input { width: 100%; }
+}
+
+/* Tabel pengajuan sederhana */
+table.pengajuan-tbl input[type=text] { width: 118px; padding: 7px 9px; font-size: 13px; }
+table.pengajuan-tbl input[type=checkbox] { width: 17px; height: 17px; accent-color: var(--accent); cursor: pointer; }
+table.pengajuan-tbl tr.is-habis { background: #f8fafc; }
+table.pengajuan-tbl tr.is-habis td { color: #94a3b8; }
+
+/* Gaji & kasbon */
+.pill-wallet { background: #eef2ff; color: #3730a3; }

@@ -258,7 +258,9 @@ function brand(array $opt = []): array
 function tk_tandai(string $tabel, int $id): void
 {
     $boleh = ['users', 'projects', 'lokasi', 'pekerjaan', 'pekerjaan_pekerja',
-              'progress_log', 'absensi', 'harga_satuan', 'jadwal', 'laporan_kerja'];
+              'progress_log', 'absensi', 'harga_satuan', 'jadwal', 'laporan_kerja',
+              'harga_satuan_pekerja', 'pengajuan', 'pengajuan_item',
+              'kasbon', 'penggajian', 'penggajian_item'];
     if (!in_array($tabel, $boleh, true) || $id <= 0) {
         return;
     }
