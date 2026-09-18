@@ -1,0 +1,62 @@
+# =============================================================================
+#  .cpanel.yml — Instruksi deploy otomatis ke hosting cPanel
+#  Aplikasi: ProyekKita (manajemen project, absensi, gaji & kasbon)
+#
+#  Cara pakai di cPanel:
+#   1. cPanel → Git™ Version Control → Create (repo ini) → lalu "Pull or Deploy"
+#      → Deploy HEAD Commit. File ini otomatis dijalankan setelah pull.
+#   2. GANTI "cpaneluser" di bawah dengan username cPanel Anda
+#      (biasanya sama dengan nama akun hosting, lihat di cPanel kanan atas).
+#   3. Deploy ulang. Semua file PHP tersalin ke public_html.
+#
+#  PENTING: folder data/ (database SQLite + session) SENGAJA TIDAK disalin
+#  dan TIDAK dihapus, supaya data absensi/gaji yang sudah jalan tidak tertimpa
+#  saat Anda deploy versi baru.
+# =============================================================================
+
+---
+deployment:
+  tasks:
+    # ---------------------------------------------------------------------
+    # 1. Tujuan deploy — GANTI "cpaneluser" sesuai akun cPanel Anda
+    #    (kalau aplikasi ditaruh di sub-folder: /home/cpaneluser/public_html/proyek)
+    # ---------------------------------------------------------------------
+    - export DEPLOYPATH=/home/cpaneluser/public_html
+
+    # ---------------------------------------------------------------------
+    # 2. Siapkan folder tujuan (aman dijalankan berulang)
+    # ---------------------------------------------------------------------
+    - /bin/mkdir -p "$DEPLOYPATH"
+    - /bin/mkdir -p "$DEPLOYPATH/data"
+    - /bin/mkdir -p "$DEPLOYPATH/data/sessions"
+
+    # ---------------------------------------------------------------------
+    # 3. Salin kode aplikasi (folder inc/ & assets/ + semua file PHP di root)
+    #    Catatan: .vibecoder-media-token TIDAK disalin (token khusus platform,
+    #    tidak dipakai di hosting sendiri — unggah logo jadi memakai URL manual).
+    # ---------------------------------------------------------------------
+    - /bin/cp -Rf inc "$DEPLOYPATH/inc"
+    - /bin/cp -Rf assets "$DEPLOYPATH/assets"
+    - /bin/cp -f ./*.php "$DEPLOYPATH/"
+
+    # ---------------------------------------------------------------------
+    # 4. File pelindung folder data (hanya dibuat kalau belum ada — -n)
+    # ---------------------------------------------------------------------
+    - /bin/cp -n data/index.php "$DEPLOYPATH/data/index.php" || true
+    - /bin/cp -n data/.htaccess "$DEPLOYPATH/data/.htaccess" || true
+    - /bin/cp -n .htaccess "$DEPLOYPATH/.htaccess" || true
+
+    # ---------------------------------------------------------------------
+    # 5. Hak akses standar cPanel (folder 755, data/ perlu bisa ditulis)
+    # ---------------------------------------------------------------------
+    - /bin/chmod -R 755 "$DEPLOYPATH"
+    - /bin/find "$DEPLOYPATH" -type f -name "*.php" -exec /bin/chmod 644 {} \;
+    - /bin/chmod -R 775 "$DEPLOYPATH/data"
+    - /bin/chmod 644 "$DEPLOYPATH/.htaccess" || true
+
+    # ---------------------------------------------------------------------
+    # 6. Laporan singkat ke log deploy (muncul di halaman Deploy cPanel)
+    # ---------------------------------------------------------------------
+    - /bin/echo "Deploy selesai ke $DEPLOYPATH"
+    - /bin/echo "Jumlah file PHP: $(/bin/ls -1 "$DEPLOYPATH"/*.php 2>/dev/null | /usr/bin/wc -l)"
+    - /bin/echo "Pastikan folder data/ berisi database aplikasi (app.sqlite) milik server ini."

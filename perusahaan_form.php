@@ -49,6 +49,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($data['slug'] !== '' && !preg_match('/^[a-z0-9-]+$/', $data['slug'])) {
         $errors[] = 'Link hanya boleh huruf kecil, angka, dan tanda minus.';
     }
+    // Sub-domain pelanggan: hormati aturan host (panjang label & nama terlarang)
+    if ($data['slug'] !== '') {
+        if (strlen($data['slug']) > 63) {
+            $errors[] = 'Link terlalu panjang (maksimal 63 karakter, batas sub-domain).';
+        } elseif (str_starts_with($data['slug'], '-') || str_ends_with($data['slug'], '-')) {
+            $errors[] = 'Link tidak boleh diawali atau diakhiri tanda minus.';
+        } elseif (slug_terlarang($data['slug'])) {
+            $errors[] = 'Link <strong>' . e($data['slug']) . '</strong> tidak boleh dipakai karena termasuk nama sistem '
+                . '(mis. www, mail, cpanel, admin). Gunakan nama lain, mis. <span class="mono">' . e($data['slug']) . '-project</span>.';
+        }
+    }
     if (!$row) {
         if ($adminBaru['nama'] === '' || $adminBaru['username'] === '') {
             $errors[] = 'Akun admin pertama wajib diisi (nama & username).';
@@ -135,7 +146,12 @@ render_header(
       <div class="field">
         <label for="slug">Link login (opsional)</label>
         <input type="text" id="slug" name="slug" value="<?= e($data['slug']) ?>" placeholder="mis. karya-mandiri">
-        <span class="hint">Dipakai untuk link khusus: <span class="mono">login.php?p=karya-mandiri</span>. Kosongkan untuk dibuat otomatis.</span>
+        <span class="hint">
+          Dipakai sebagai <strong>alamat sub-domain</strong> perusahaan ini
+          (mis. <span class="mono">karya-mandiri.<?= e(subdomain_dasar()[0] ?? 'domain-anda.com') ?></span>)
+          sekaligus link cadangan <span class="mono">login.php?p=karya-mandiri</span>.
+          Kosongkan untuk dibuat otomatis dari nama perusahaan.
+        </span>
       </div>
 
       <div class="field full">

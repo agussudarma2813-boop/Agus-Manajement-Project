@@ -4,3 +4,11 @@ node_modules/
 *.sqlite3-wal
 *.sqlite3-shm
 .vibecoder-media-token
+
+# Database & session aplikasi — berisi data asli (project, pekerja, absensi, gaji, kasbon).
+# Jangan ikut ke repositori/GitHub.
+data/*.sqlite
+data/*.sqlite3
+data/*.sqlite-wal
+data/*.sqlite-shm
+data/sessions/

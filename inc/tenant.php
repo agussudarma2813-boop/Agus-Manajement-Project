@@ -333,31 +333,95 @@ function host_saat_ini(): string
     return rtrim($host, '.');
 }
 
+/** Sub-domain yang tidak boleh dipakai (nama teknis server/hosting) */
+const SLUG_TERLARANG = [
+    'www', 'mail', 'email', 'smtp', 'pop', 'pop3', 'imap', 'mx', 'ftp', 'sftp',
+    'cpanel', 'whm', 'webmail', 'webdisk', 'autodiscover', 'autoconfig',
+    'ns1', 'ns2', 'ns3', 'dns', 'localhost', 'admin', 'administrator',
+    'api', 'app', 'apps', 'login', 'logout', 'test', 'testing', 'dev', 'staging',
+    'demo', 'static', 'cdn', 'assets', 'img', 'images', 'blog', 'shop', 'store',
+    'panel', 'server', 'status', 'support', 'user', 'www2',
+];
+
+/** Apakah slug termasuk nama yang dilarang (dipakai sistem) */
+function slug_terlarang(string $slug): bool
+{
+    return in_array(strtolower(trim($slug)), SLUG_TERLARANG, true);
+}
+
+/** Apakah slug sudah dipakai sebuah perusahaan (dengan cache per request) */
+function slug_perusahaan_ada(string $slug): bool
+{
+    static $cache = [];
+    $slug = strtolower(trim($slug));
+    if ($slug === '') {
+        return false;
+    }
+    if (array_key_exists($slug, $cache)) {
+        return $cache[$slug];
+    }
+    try {
+        $st = db()->prepare("SELECT 1 FROM perusahaan WHERE lower(slug) = ? AND slug <> '' LIMIT 1");
+        $st->execute([$slug]);
+        return $cache[$slug] = (bool) $st->fetchColumn();
+    } catch (Throwable $e) {
+        return $cache[$slug] = false;
+    }
+}
+
 /**
  * Mengambil kata sub-domain dari host yang sedang diakses.
+ *
+ * Dua mode:
+ *  1. Domain dasar diatur (pengaturan_app.subdomain_base) → paling akurat,
+ *     hanya sub-domain di bawah domain itu yang dibaca.
+ *  2. Domain dasar BELUM diatur → deteksi otomatis: host harus punya minimal
+ *     3 label (mis. pt-maju.agsapkkreatif.my.id) dan label pertamanya harus
+ *     cocok dengan slug perusahaan yang benar-benar ada. Jadi
+ *     "example.com" atau "www.example.com" tidak pernah dianggap sub-domain.
+ *
  * @return string|null  null bila tidak ada sub-domain yang cocok
  */
 function subdomain_slug(): ?string
 {
+    // Sengaja TANPA cache statis: hasilnya harus selalu mengikuti host request
+    // (host tidak berubah dalam satu request, tapi cache statis menyulitkan
+    // pengujian dan berisiko memakai hasil host yang salah). Yang di-cache adalah
+    // query DB-nya (subdomain_dasar() & slug_perusahaan_ada()).
     $host = host_saat_ini();
     if ($host === '') {
         return null;
     }
-    foreach (subdomain_dasar() as $dasar) {
-        if ($host === $dasar) {
-            return null; // domain utama, bukan sub-domain pelanggan
-        }
-        if (str_ends_with($host, '.' . $dasar)) {
-            $sub = substr($host, 0, strlen($host) - strlen('.' . $dasar));
-            if ($sub === '' || str_contains($sub, '.')) {
-                return null; // kosong atau terlalu banyak label (mis. a.b.domain)
+
+    $dasar = subdomain_dasar();
+    if ($dasar) {
+        foreach ($dasar as $d) {
+            if ($host === $d) {
+                return null; // domain utama, bukan sub-domain pelanggan
             }
-            if (preg_match('/^[a-z0-9-]+$/', $sub) === 1) {
-                return $sub;
+            if (str_ends_with($host, '.' . $d)) {
+                $sub = substr($host, 0, strlen($host) - strlen('.' . $d));
+                if ($sub === '' || str_contains($sub, '.')) {
+                    return null; // kosong atau terlalu banyak label (mis. a.b.domain)
+                }
+                if (preg_match('/^[a-z0-9-]+$/', $sub) === 1 && !slug_terlarang($sub)) {
+                    return $sub;
+                }
+                return null;
             }
         }
+        return null; // host di luar domain dasar yang dikenal
     }
-    return null;
+
+    // --- Mode otomatis (belum ada pengaturan domain dasar) ---
+    if (substr_count($host, '.') < 2) {
+        return null; // hanya 2 label → domain utama
+    }
+    $label = substr($host, 0, (int) strpos($host, '.'));
+    if (preg_match('/^[a-z0-9-]+$/', $label) !== 1 || slug_terlarang($label)) {
+        return null;
+    }
+    return slug_perusahaan_ada($label) ? $label : null;
 }
 
 /**
@@ -370,8 +434,7 @@ function perusahaan_dari_host(bool $hanyaAktif = true): ?array
     if ($slug === null) {
         return null;
     }
-    $sql = 'SELECT * FROM perusahaan WHERE lower(slug) = ? AND slug <> \'\' LIMIT 1';
-    $st = db()->prepare($sql);
+    $st = db()->prepare("SELECT * FROM perusahaan WHERE lower(slug) = ? AND slug <> '' LIMIT 1");
     $st->execute([$slug]);
     $p = $st->fetch() ?: null;
     if (!$p) {

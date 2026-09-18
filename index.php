@@ -5,17 +5,11 @@ require_once __DIR__ . '/inc/auth.php';
 /**
  * Titik masuk aplikasi.
  *
- * Di sini sub-domain pelanggan juga dibaca: kalau aplikasi dibuka lewat
- * pt-maju.agsapkkreatif.my.id, konteks perusahaan "pt-maju" disiapkan lebih dulu
- * (branding + penguncian login), baru diarahkan ke dashboard / halaman masuk.
+ * Sub-domain pelanggan dibaca di sini juga, supaya aplikasi langsung terkunci ke
+ * perusahaan yang tepat begitu alamatnya dibuka (mis. pt-maju.agsapkkreatif.my.id),
+ * lalu diarahkan ke dashboard (kalau sudah masuk) atau halaman login (yang akan
+ * memakai nama & logo perusahaan tersebut).
  */
-$perusahaanSub = perusahaan_dari_host();
-
-if ($perusahaanSub) {
-    // Simpan hanya slug-nya (bukan data sensitif) supaya halaman login memakai konteks yang sama
-    $_SESSION['sub_slug'] = (string) $perusahaanSub['slug'];
-} else {
-    unset($_SESSION['sub_slug']);
-}
+perusahaan_dari_host();
 
 redirect(current_user() ? 'dashboard.php' : 'login.php');
