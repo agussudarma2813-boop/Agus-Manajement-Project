@@ -268,3 +268,140 @@ function tk_tandai(string $tabel, int $id): void
     db()->prepare('UPDATE ' . $tabel . ' SET perusahaan_id = ? WHERE ' . $kolomId . ' = ? AND perusahaan_id = 0')
         ->execute([tenant_id(), $id]);
 }
+
+/* ==========================================================================
+   SUB-DOMAIN PER PERUSAHAAN
+   --------------------------------------------------------------------------
+   Mis. domain dasar "agsapkkreatif.my.id": pelanggan membuka
+       https://pt-maju.agsapkkreatif.my.id
+   → kata "pt-maju" dibaca dari host, lalu dipakai untuk MENGUNCI aplikasi ke
+     perusahaan dengan slug "pt-maju": branding, login, dan seluruh data
+     (absensi, gaji, penggajian, kasbon) hanya milik perusahaan itu.
+
+   Catatan keamanan:
+   - Host header TIDAK dipercaya begitu saja: hanya huruf kecil/angka/minus,
+     hanya satu label, dan WAJIB cocok dengan slug perusahaan yang ada.
+   - Domain dasar diisi oleh pengelola aplikasi (tidak di-hardcode).
+   - Yang benar-benar mengunci data adalah `perusahaan_id` milik user yang login
+     (isolasi tenant yang sudah ada). Sub-domain hanya menentukan gerbang login,
+     jadi salah/tipu host tidak bisa membocorkan data perusahaan lain.
+   ========================================================================== */
+
+/** Nilai pengaturan aplikasi (mis. 'subdomain_base') */
+function app_setting(string $kunci, string $bawaan = ''): string
+{
+    static $cache = [];
+    if (array_key_exists($kunci, $cache)) {
+        return $cache[$kunci];
+    }
+    try {
+        $st = db()->prepare('SELECT nilai FROM pengaturan_app WHERE kunci = ?');
+        $st->execute([$kunci]);
+        $v = $st->fetchColumn();
+        return $cache[$kunci] = ($v === false ? $bawaan : (string) $v);
+    } catch (Throwable $e) {
+        return $cache[$kunci] = $bawaan;
+    }
+}
+
+function app_setting_set(string $kunci, string $nilai): void
+{
+    db()->prepare('INSERT INTO pengaturan_app (kunci, nilai) VALUES (?,?)
+                   ON CONFLICT(kunci) DO UPDATE SET nilai = excluded.nilai')
+        ->execute([$kunci, $nilai]);
+}
+
+/** Daftar domain dasar yang boleh dipakai untuk sub-domain (bisa lebih dari satu) */
+function subdomain_dasar(): array
+{
+    $mentah = strtolower(app_setting('subdomain_base', ''));
+    $out = [];
+    foreach (preg_split('/[,\s]+/', $mentah) ?: [] as $d) {
+        $d = ltrim(trim($d), '.');
+        if ($d !== '' && preg_match('/^[a-z0-9.-]+$/', $d)) {
+            $out[] = $d;
+        }
+    }
+    return array_values(array_unique($out));
+}
+
+/** Host yang sedang diakses, tanpa port, huruf kecil */
+function host_saat_ini(): string
+{
+    $host = strtolower(trim((string) ($_SERVER['HTTP_HOST'] ?? '')));
+    $host = preg_replace('/:\d+$/', '', $host) ?? '';
+    return rtrim($host, '.');
+}
+
+/**
+ * Mengambil kata sub-domain dari host yang sedang diakses.
+ * @return string|null  null bila tidak ada sub-domain yang cocok
+ */
+function subdomain_slug(): ?string
+{
+    $host = host_saat_ini();
+    if ($host === '') {
+        return null;
+    }
+    foreach (subdomain_dasar() as $dasar) {
+        if ($host === $dasar) {
+            return null; // domain utama, bukan sub-domain pelanggan
+        }
+        if (str_ends_with($host, '.' . $dasar)) {
+            $sub = substr($host, 0, strlen($host) - strlen('.' . $dasar));
+            if ($sub === '' || str_contains($sub, '.')) {
+                return null; // kosong atau terlalu banyak label (mis. a.b.domain)
+            }
+            if (preg_match('/^[a-z0-9-]+$/', $sub) === 1) {
+                return $sub;
+            }
+        }
+    }
+    return null;
+}
+
+/**
+ * Perusahaan yang cocok dengan sub-domain yang sedang diakses.
+ * Tidak memakai sesi (dipakai juga di halaman login sebelum user masuk).
+ */
+function perusahaan_dari_host(bool $hanyaAktif = true): ?array
+{
+    $slug = subdomain_slug();
+    if ($slug === null) {
+        return null;
+    }
+    $sql = 'SELECT * FROM perusahaan WHERE lower(slug) = ? AND slug <> \'\' LIMIT 1';
+    $st = db()->prepare($sql);
+    $st->execute([$slug]);
+    $p = $st->fetch() ?: null;
+    if (!$p) {
+        return null;
+    }
+    if ($hanyaAktif && tenant_alasan_tutup($p) !== '') {
+        return $p; // tetap dikembalikan supaya bisa ditampilkan alasannya
+    }
+    return $p;
+}
+
+/**
+ * Tautan login siap dibagikan untuk sebuah perusahaan.
+ * Kalau domain dasar sudah diatur → pakai sub-domain; kalau belum → pakai ?p=slug.
+ */
+function tautan_perusahaan(array $p, string $skema = 'https', string $subpath = ''): string
+{
+    $slug = trim((string) $p['slug']);
+    if ($slug === '') {
+        return 'login.php';
+    }
+    $dasar = subdomain_dasar()[0] ?? '';
+    if ($dasar !== '') {
+        return $skema . '://' . $slug . '.' . $dasar . ($subpath !== '' ? '/' . ltrim($subpath, '/') : '') . '/';
+    }
+    return 'login.php?p=' . rawurlencode($slug);
+}
+
+/** Apakah sub-domain sedang dipakai (untuk pesan/informasi) */
+function mode_subdomain(): bool
+{
+    return subdomain_slug() !== null;
+}

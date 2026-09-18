@@ -115,11 +115,18 @@ render_header(
         </div>
 
         <?php if (trim((string) $p['slug']) !== ''): ?>
+          <?php $tautan = tautan_perusahaan($p); ?>
           <div class="small">
             Link login perusahaan:
-            <span class="mono">login.php?p=<?= e($p['slug']) ?></span>
-            <button class="btn btn-sm" type="button" data-copy-text="login.php?p=<?= e($p['slug']) ?>">Salin</button>
+            <span class="mono"><?= e($tautan) ?></span>
+            <button class="btn btn-sm" type="button" data-copy-text="<?= e($tautan) ?>">Salin</button>
           </div>
+          <?php if (subdomain_dasar()): ?>
+            <div class="small muted">
+              Saat dibuka lewat link ini, aplikasi otomatis terkunci ke perusahaan ini saja
+              (absensi, gaji &amp; kasbon terpisah).
+            </div>
+          <?php endif; ?>
         <?php endif; ?>
 
         <?php if (trim((string) $p['catatan']) !== ''): ?>
@@ -158,6 +165,51 @@ render_header(
     <?php endforeach; ?>
   </div>
 <?php endif; ?>
+
+<div class="card">
+  <div class="card-head" style="padding:0 0 14px;border-bottom:1px solid var(--line-soft);margin-bottom:16px">
+    <div>
+      <h2>Domain &amp; Sub-domain Pelanggan</h2>
+      <p>Aplikasi otomatis terkunci ke perusahaan sesuai alamat yang dibuka</p>
+    </div>
+  </div>
+  <form method="post" action="pengaturan_domain.php" class="form-grid">
+    <?= csrf_field() ?>
+    <div class="field">
+      <label for="subdomain_base">Domain dasar</label>
+      <input type="text" id="subdomain_base" name="subdomain_base"
+             value="<?= e(app_setting('subdomain_base', '')) ?>"
+             placeholder="mis. agsapkkreatif.my.id">
+      <span class="hint">
+        Boleh lebih dari satu, pisahkan dengan koma. Kosongkan bila belum memakai sub-domain.
+      </span>
+    </div>
+    <div class="field">
+      <label>Contoh hasilnya</label>
+      <div class="money-note">
+        <?php $dasarContoh = subdomain_dasar()[0] ?? ''; ?>
+        <?php if ($dasarContoh !== ''): ?>
+          <span class="mono">https://pt-maju.<?= e($dasarContoh) ?>/</span> → otomatis menampilkan data
+          perusahaan dengan slug <span class="mono">pt-maju</span> saja.
+        <?php else: ?>
+          Belum diatur. Untuk sekarang pakai tautan <span class="mono">login.php?p=slug</span> di tiap perusahaan.
+        <?php endif; ?>
+      </div>
+    </div>
+    <div class="field full">
+      <button class="btn btn-primary" type="submit">Simpan Domain</button>
+    </div>
+  </form>
+  <p class="small muted" style="margin-top:14px">
+    <strong>Cara kerja:</strong> kata pertama pada alamat dibaca sebagai <em>slug</em> perusahaan, lalu:
+    (1) halaman masuk memakai nama &amp; logo perusahaan itu,
+    (2) hanya akun milik perusahaan tersebut yang boleh masuk dari alamat itu,
+    (3) absensi, gaji, kasbon, dan seluruh data lain otomatis hanya milik mereka.
+    Alamat yang kata pertamanya tidak cocok dengan slug mana pun akan menolak masuk (bukan menampilkan data perusahaan lain).
+    <br>Perlu diingat: sub-domain ini aktif hanya bila domain <span class="mono">*.<em>domain-dasar</em></span>
+    sudah diarahkan ke aplikasi ini (DNS + SSL wildcard). Bila belum, tautan di kartu perusahaan tetap bisa dipakai.
+  </p>
+</div>
 
 <div class="card">
   <h2 class="card-title">Cara menjual ke teman (panduan singkat)</h2>

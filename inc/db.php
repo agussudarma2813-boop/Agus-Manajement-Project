@@ -268,6 +268,13 @@ function app_migrate(PDO $pdo): void
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_perusahaan_slug ON perusahaan(slug) WHERE slug <> '';
 
+        /* Pengaturan tingkat aplikasi (bukan per perusahaan), mis. domain dasar
+           untuk sub-domain pelanggan: pt-maju.<domain-dasar>. */
+        CREATE TABLE IF NOT EXISTS pengaturan_app (
+            kunci TEXT PRIMARY KEY,
+            nilai TEXT NOT NULL DEFAULT ''
+        );
+
         /* Konteks request: perusahaan mana yang sedang aktif. Dipakai TRIGGER
            untuk menandai perusahaan_id baris baru secara otomatis, sehingga
            tidak mungkin ada data yang "lupa" ditandai perusahaan. */

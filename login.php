@@ -9,17 +9,33 @@ if (current_user()) {
 $error = '';
 $username = '';
 
+/* ==========================================================================
+   KUNCI PERUSAHAAN DARI SUB-DOMAIN
+   --------------------------------------------------------------------------
+   Bila aplikasi dibuka lewat sub-domain, mis. pt-maju.agsapkkreatif.my.id,
+   kata "pt-maju" dibaca dari host lalu dipakai sebagai filter: halaman ini
+   memakai branding perusahaan itu, dan hanya akun milik perusahaan tersebut
+   yang boleh masuk dari sini. Data absensi/gaji otomatis terkunci ke
+   perusahaan tersebut karena semua query dibatasi `perusahaan_id` user.
+   ========================================================================== */
+$perusahaanSub = perusahaan_dari_host();
+$alasanSub = $perusahaanSub ? tenant_alasan_tutup($perusahaanSub) : '';
+
 /**
- * Branding per perusahaan: pelanggan bisa dibukakan link khusus
- * login.php?p=<slug> sehingga halaman login memakai nama & logo mereka.
+ * Branding per perusahaan: lewat sub-domain (pt-maju.domain.com) ATAU
+ * link khusus login.php?p=<slug>.
  */
-$perusahaanLogin = null;
-$slugLogin = trim((string) ($_GET['p'] ?? ''));
-if ($slugLogin !== '') {
-    $stp = db()->prepare('SELECT * FROM perusahaan WHERE slug = ?');
-    $stp->execute([$slugLogin]);
-    $perusahaanLogin = $stp->fetch() ?: null;
+$perusahaanLogin = $perusahaanSub;
+if (!$perusahaanLogin) {
+    $slugLogin = trim((string) ($_GET['p'] ?? ''));
+    if ($slugLogin !== '') {
+        $stp = db()->prepare('SELECT * FROM perusahaan WHERE slug = ?');
+        $stp->execute([$slugLogin]);
+        $perusahaanLogin = $stp->fetch() ?: null;
+    }
 }
+// Sub-domain yang tidak dikenal: jangan diam-diam memakai data perusahaan lain.
+$subTidakDikenal = mode_subdomain() && !$perusahaanSub;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
@@ -46,6 +62,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             if ($alasan !== '') {
                 $error = $alasan;
+            } elseif ($perusahaanSub && (int) $u['perusahaan_id'] !== (int) $perusahaanSub['id']) {
+                // Sub-domain mengunci: akun perusahaan lain tidak boleh masuk dari sini
+                $error = 'Akun ini bukan milik <strong>' . e((string) $perusahaanSub['nama'])
+                    . '</strong>. Silakan masuk lewat alamat perusahaan Anda.';
             } else {
                 session_regenerate_id(true);
                 $_SESSION['uid'] = (int) $u['id'];
@@ -100,6 +120,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <p class="muted">Gunakan akun yang diberikan admin project.</p>
     <?php if ($perusahaanLogin && tenant_alasan_tutup($perusahaanLogin) !== ''): ?>
       <div class="alert alert-err"><?= e(tenant_alasan_tutup($perusahaanLogin)) ?></div>
+    <?php endif; ?>
+    <?php if ($subTidakDikenal): ?>
+      <div class="alert alert-err">
+        Sub-domain <strong><?= e((string) subdomain_slug()) ?></strong> belum terdaftar sebagai perusahaan.
+        Hubungi pengelola aplikasi, atau masuk lewat alamat utama.
+      </div>
+    <?php endif; ?>
+    <?php if ($perusahaanSub): ?>
+      <p class="small muted" style="margin:-6px 0 0">
+        Anda masuk lewat alamat perusahaan ini — data yang tampil hanya milik
+        <strong><?= e((string) $perusahaanSub['nama']) ?></strong> (absensi, gaji &amp; kasbon terpisah dari perusahaan lain).
+      </p>
     <?php endif; ?>
 
     <?php if ($error !== ''): ?>
